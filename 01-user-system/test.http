@@ -1,0 +1,62 @@
+### 1. Create a user (POST) -> expect 201 Created, JSON without password
+POST http://localhost:8080/api/users
+Content-Type: application/json
+
+{
+  "username": "alice",
+  "email": "alice@example.com",
+  "password": "secret123",
+  "fullName": "Alice Wang",
+  "age": 25
+}
+
+### 2. Get all users (GET) -> expect 200, list containing alice
+GET http://localhost:8080/api/users
+
+### 3. Get user by id (GET) -> expect 200, alice
+GET http://localhost:8080/api/users/1
+
+### 4. Search users (GET) -> expect 200, alice matched by keyword
+GET http://localhost:8080/api/users/search?keyword=ali
+
+### 5. Update user (PUT) -> expect 200, updated alice
+PUT http://localhost:8080/api/users/1
+Content-Type: application/json
+
+{
+  "username": "alice",
+  "email": "alice@example.com",
+  "password": "newpass123",
+  "fullName": "Alice Updated",
+  "age": 26
+}
+
+### 6. Delete user (DELETE) -> expect 204 No Content
+DELETE http://localhost:8080/api/users/1
+
+### 7. Get a non-existing user -> expect 404 (verifies exception layer)
+GET http://localhost:8080/api/users/999
+
+### 8. Duplicate username -> expect 409 Conflict (re-create alice first, then run this)
+POST http://localhost:8080/api/users
+Content-Type: application/json
+
+{
+  "username": "alice",
+  "email": "another@example.com",
+  "password": "secret123",
+  "fullName": "Fake Alice",
+  "age": 30
+}
+
+### 9. Validation failure: blank username + bad email + weak password + negative age -> expect 400
+POST http://localhost:8080/api/users
+Content-Type: application/json
+
+{
+  "username": "",
+  "email": "not-an-email",
+  "password": "123",
+  "fullName": "Bad Input",
+  "age": -5
+}
