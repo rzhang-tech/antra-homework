@@ -17,7 +17,7 @@ technology enters.
 | 2 | PostgreSQL, indexes, transactions, N+1, optimistic locking | ☑ done |
 | 3 | Spring Security, JWT, USER/ADMIN roles | ☑ done |
 | 4 | Testing — 50 tests: unit, repository, web, integration | ☑ done |
-| 5 | Split into microservices | ◐ 5a done — user-service + book-service, separate databases |
+| 5 | Split into microservices | ◐ 5a-5b done — user, book and order services |
 | 6–11 | Config · Kafka · Gateway · AWS · K8s · CI/CD | planned |
 
 ## Layout
@@ -31,7 +31,8 @@ technology enters.
 │   └── decisions.md      # why each non-obvious choice was made (interview answers live here)
 ├── bookstore-platform/   # the services (Steps 5-11)
 │   ├── user-service/     # owns users; the only service that issues tokens
-│   └── book-service/     # owns the catalog and stock; verifies tokens, never mints them
+│   ├── book-service/     # owns the catalog and stock; verifies tokens, never mints them
+│   └── order-service/    # owns orders; calls book-service over HTTP for price and stock
 ├── docker-compose.yml    # one PostgreSQL per service
 └── scripts/              # benchmark data, concurrency demo
 
@@ -70,7 +71,11 @@ cd bookstore-platform/user-service && ../mvnw spring-boot:run
 cd bookstore-platform/book-service && ../mvnw spring-boot:run
 ```
 
-user-service listens on 8081, book-service on 8082. See
+```bash
+cd bookstore-platform/order-service && ../mvnw spring-boot:run
+```
+
+user-service listens on 8081, book-service on 8082, order-service on 8083. See
 [bookstore-platform/test-platform.http](bookstore-platform/test-platform.http) for requests that cross
 the boundary.
 

@@ -1,8 +1,6 @@
-package com.example.user.security;
+package com.example.order.security;
 
-import com.example.user.config.JwtProperties;
-import com.example.user.entity.Role;
-import com.example.user.entity.User;
+import com.example.order.config.JwtProperties;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
@@ -18,7 +16,12 @@ import java.util.Date;
 import java.util.Optional;
 
 /**
- * Mints and verifies JSON Web Tokens.
+ * Verifies JSON Web Tokens. It cannot mint them.
+ *
+ * <p>The {@code generate} method was deleted when this service was split out of the monolith. Only
+ * user-service issues tokens; book-service holds the same signing key solely to check signatures.
+ * Leaving the method here would let a future change quietly turn the catalog service into a second
+ * identity provider — and two services minting credentials is two places to audit.
  *
  * <p>A JWT is three base64url segments joined by dots:
  *
@@ -46,21 +49,6 @@ public class JwtUtil {
 
     private static final String CLAIM_ROLE = "role";
 
-    /**
-     * The user's database id.
-     *
-     * <p>Added when order-service appeared. An order records who placed it as a plain {@code user_id},
-     * and order-service has no access to the users table — so the id has to travel in the token or be
-     * fetched over HTTP on every single order. Putting it in a claim removes a network call from the
-     * critical path of every request, at the cost of one more field that goes stale if a user is
-     * deleted. For an immutable surrogate key that trade is easy.
-     *
-     * <p>Note what is NOT added: email, or anything else a downstream service might be tempted to
-     * display. A token is readable by anyone holding it (see {@link #parse}), so every extra claim is
-     * a deliberate disclosure.
-     */
-    private static final String CLAIM_USER_ID = "uid";
-
     private final SecretKey key;
     private final Duration expiration;
     private final String issuer;
@@ -69,21 +57,6 @@ public class JwtUtil {
         this.key = Keys.hmacShaKeyFor(properties.secret().getBytes(StandardCharsets.UTF_8));
         this.expiration = Duration.ofMinutes(properties.expirationMinutes());
         this.issuer = properties.issuer();
-    }
-
-    public String generate(User user) {
-        Instant now = Instant.now();
-        return Jwts.builder()
-                // `sub` — who the token is about. The standard place for the principal's identity.
-                .subject(user.getUsername())
-                // A custom claim, so authorization needs no database lookup on later requests.
-                .claim(CLAIM_ROLE, user.getRole().name())
-                .claim(CLAIM_USER_ID, user.getId())
-                .issuer(issuer)
-                .issuedAt(Date.from(now))
-                .expiration(Date.from(now.plus(expiration)))
-                .signWith(key)
-                .compact();
     }
 
     /**
@@ -114,11 +87,22 @@ public class JwtUtil {
         return claims.getSubject();
     }
 
+    /**
+     * The role claim, as the raw string user-service put there.
+     *
+     * <p>Deliberately not parsed into an enum. book-service does not own the set of roles — user-service
+     * does — and copying that enum here would mean the catalog crashes in its security filter the day
+     * someone adds a role upstream. Returning the string lets an unrecognised role simply match no
+     * authorization rule, which is a 403: the safe outcome, and a decision this service is entitled to
+     * make. Sharing the enum in a common jar would trade this small duplication for a lockstep release
+     * between two services that otherwise have nothing to do with each other (D12).
+     */
+    /** The customer's id, from the {@code uid} claim user-service adds. */
     public Long userIdOf(Claims claims) {
-        return claims.get(CLAIM_USER_ID, Long.class);
+        return claims.get("uid", Long.class);
     }
 
-    public Role roleOf(Claims claims) {
-        return Role.valueOf(claims.get(CLAIM_ROLE, String.class));
+    public String roleOf(Claims claims) {
+        return claims.get(CLAIM_ROLE, String.class);
     }
 }

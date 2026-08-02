@@ -93,3 +93,74 @@ Content-Type: application/json
 ###     payload below by hand and this returns 401 rather than acting on it.
 GET {{bookService}}/api/books/1
 Authorization: Bearer {{userToken}}
+
+### ---------------------------------------------------------------------------
+### order-service (8083) — Step 5b
+###
+### Placing an order is the first request that fans out: order-service calls
+### book-service over HTTP, forwarding the customer's token, before it can write
+### anything of its own.
+### ---------------------------------------------------------------------------
+
+@orderService = http://localhost:8083
+
+### 12. Place an order -> 201. Watch order-service's log: a Feign call per book.
+POST {{orderService}}/api/orders
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{
+  "items": [
+    { "bookId": 1, "quantity": 2 },
+    { "bookId": 2, "quantity": 1 }
+  ]
+}
+
+### 13. My orders -> 200, scoped by the token rather than by any parameter
+GET {{orderService}}/api/orders
+Authorization: Bearer {{userToken}}
+
+### 14. Every order -> 403 for a customer
+GET {{orderService}}/api/orders/all
+Authorization: Bearer {{userToken}}
+
+### 15. Every order -> 200 for an admin
+GET {{orderService}}/api/orders/all
+Authorization: Bearer {{adminToken}}
+
+### 16. A book that does not exist -> 404 (book-service's 404, retold)
+POST {{orderService}}/api/orders
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "items": [ { "bookId": 99999, "quantity": 1 } ] }
+
+### 17. More than the shelf holds -> 409, refused before any stock is reserved
+POST {{orderService}}/api/orders
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "items": [ { "bookId": 1, "quantity": 99999 } ] }
+
+### 18. Cancel an order -> 200
+PUT {{orderService}}/api/orders/1/cancel
+Authorization: Bearer {{userToken}}
+
+### ---------------------------------------------------------------------------
+### 19. THE INTERESTING ONE. Stop book-service, then run this.
+###
+###     -> 503, in about 100 ms
+###
+### Not 500: the request was fine and the catalog is down, which is what 503
+### means. And note what still works with the catalog stopped — request 13 above
+### returns order history in full, because the title and price were captured at
+### order time rather than fetched on read.
+###
+### What is still wrong: every attempt pays the full timeout before failing, and
+### one slow catalog can therefore exhaust order-service's threads. Step 5c.
+### ---------------------------------------------------------------------------
+POST {{orderService}}/api/orders
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "items": [ { "bookId": 1, "quantity": 1 } ] }

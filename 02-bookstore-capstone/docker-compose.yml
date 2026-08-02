@@ -48,6 +48,24 @@ services:
       timeout: 3s
       retries: 10
 
+  order-db:
+    image: postgres:17-alpine
+    container_name: bookstore-order-db
+    environment:
+      POSTGRES_DB: orderdb
+      POSTGRES_USER: orderdb
+      POSTGRES_PASSWORD: orderdb
+    ports:
+      - "5435:5432"
+    volumes:
+      - order-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orderdb -d orderdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   user-pgdata:
   book-pgdata:
+  order-pgdata:

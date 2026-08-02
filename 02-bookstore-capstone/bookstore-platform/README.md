@@ -12,7 +12,7 @@ git checkout step-4-monolith
 |---------|------|----------|-------|
 | `user-service` | 8081 | `userdb` on 5433 | ☑ 5a |
 | `book-service` | 8082 | `bookdb` on 5434 | ☑ 5a |
-| `order-service` | 8083 | `orderdb` | 5b |
+| `order-service` | 8083 | `orderdb` on 5435 | ☑ 5b |
 | `payment-service` | 8084 | `paymentdb` | 5d |
 
 ## Run it
@@ -21,7 +21,7 @@ git checkout step-4-monolith
 docker compose up -d
 ```
 
-(from `02-bookstore-capstone/` — starts **two** PostgreSQL instances)
+(from `02-bookstore-capstone/` — starts **three** PostgreSQL instances)
 
 ```bash
 cd user-service && ../mvnw spring-boot:run
@@ -29,6 +29,10 @@ cd user-service && ../mvnw spring-boot:run
 
 ```bash
 cd book-service && ../mvnw spring-boot:run
+```
+
+```bash
+cd order-service && ../mvnw spring-boot:run
 ```
 
 Then work through [test-platform.http](test-platform.http), which exercises the boundary itself: a token
@@ -40,7 +44,7 @@ Everything at once:
 ./mvnw test
 ```
 
-57 tests across both services. Testcontainers supplies the databases, so nothing needs to be running.
+71 tests across the three services. Testcontainers supplies the databases, so nothing needs to be running.
 
 ---
 
@@ -132,8 +136,92 @@ Worth stating plainly, because this is the part a microservices tutorial usually
 None of these were problems in the monolith. They are the price of independent deployability, and the
 next steps are largely about paying it down.
 
-## Next — 5b
+---
 
-`order-service`: placing an order requires knowing a book's price and stock, which now live behind an
-HTTP call that can fail. OpenFeign with an explicit timeout, and the user's identity propagated across
-the hop.
+# Step 5b — order-service, and the first cross-service call
+
+`POST /api/orders` is the first request on this platform that cannot be served by one service. Placing
+an order needs a book's price and stock, and those live in another process now.
+
+## What a method call became
+
+In the monolith this was `bookService.findById(id)`: it could not fail, returned in microseconds, and
+shared a transaction with its caller. The Feign version looks almost identical at the call site — which
+is exactly what makes distributed systems deceptive. It can now be slow, time out, return 500, or find
+nobody listening, and none of that is visible in the syntax.
+
+```java
+@FeignClient(name = "book-service", url = "${app.book-service.url}")
+public interface BookClient {
+    @GetMapping("/api/books/{id}")
+    BookSnapshot findById(@PathVariable("id") Long id);
+}
+```
+
+## Identity has to be carried by hand
+
+Without `FeignAuthPropagation`, order-service authenticates the customer perfectly and then calls
+book-service **anonymously** — so the purchase comes back 401 and ordering fails for a reason that has
+nothing to do with orders. The monolith never had to think about this because there was no hop.
+
+The token is forwarded rather than a service account used, because book-service's rules are written
+about *people*: a customer may purchase, only an admin may edit the catalog. A service identity would
+mean either giving order-service broader permissions than any of its callers — a confused deputy — or
+duplicating user-facing rules into a second policy. One set of rules, evaluated against the real actor.
+
+The cost is real: the downstream call inherits the token's lifetime, and forwarding is only safe inside
+one trust boundary. A token must never be passed to a third party.
+
+## Explicit timeouts
+
+```yaml
+connect-timeout: 2000
+read-timeout: 3000
+```
+
+Feign's defaults are effectively "wait forever". An unbounded call is how one slow service exhausts
+every caller's threads and takes the platform down with it. These numbers are a promise about how long
+order-service is willing to be blocked — not a guess at how fast the catalog is.
+
+## Prices and titles are captured, not referenced
+
+`order_item` stores `book_title` and `unit_price` as they were when the order was placed. Two reasons,
+and both showed up in testing:
+
+- **Correctness.** A price change must not alter what a past customer was charged.
+- **Availability.** With book-service stopped, `GET /api/orders` still returns full order history,
+  titles and prices included. A version that looked prices up on read would have gone down with the
+  catalog.
+
+## The ordering of a place-order
+
+1. **Read every book and validate.** Free and reversible; rejects bad orders before anything changes.
+2. **Reserve stock, item by item.** The first call with consequences.
+3. **Write the order locally.** Last, because it is the only step this service can roll back.
+
+`@Transactional` on that method now covers *only this service's rows*. It has no authority over anything
+book-service committed. That is the honest statement of the problem 5d solves.
+
+## Two bugs this step produced
+
+**An `ErrorDecoder` only sees HTTP responses.** With book-service stopped, placing an order returned
+**500** — the carefully-written status mapping never ran, because Feign throws before any decoder when
+there is no response at all. A `FeignException` handler now maps transport failures to **503**, which is
+the true statement: the request was fine, the catalog is down. A 500 blames the caller and sends someone
+debugging the wrong service.
+
+**A `@Configuration` class cannot share a name with its own `@Bean` method.** `BookClientErrorDecoder`
+registered a bean named after the class *and* a bean named after the method, and the context refused to
+start. Renaming it `BookClientErrorConfig` fixed it and is a better name anyway — it is configuration
+that produces a decoder, not a decoder.
+
+## What still fails badly
+
+With book-service stopped, every order attempt still travels the full path and pays the timeout before
+failing. Under load that means every request thread parked for seconds waiting on a service already
+known to be down — the classic cascading failure. 5c makes it fail fast.
+
+## Next — 5c
+
+Resilience4j: a circuit breaker that stops calling a service that is clearly down, a retry for
+transient blips, and a fallback so browsing degrades instead of erroring.
