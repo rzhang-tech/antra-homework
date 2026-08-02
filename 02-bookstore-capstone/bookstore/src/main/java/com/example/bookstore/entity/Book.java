@@ -71,8 +71,13 @@ public class Book {
     /**
      * Optimistic-locking token. Hibernate increments it on every update and fails the write if another
      * transaction already moved it — which is how two concurrent orders cannot both sell the last copy.
+     *
+     * <p>The column is {@code NOT NULL DEFAULT 0} as of V5. Hibernate initialises it for entities it
+     * creates, but a row inserted by plain SQL used to land with NULL, and the first update of such a
+     * row then failed on the increment.
      */
     @Version
+    @Column(nullable = false)
     private Long version;
 
     @CreationTimestamp

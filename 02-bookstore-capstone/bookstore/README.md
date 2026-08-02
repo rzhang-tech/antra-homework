@@ -644,6 +644,102 @@ Worth stating precisely, because they are routinely confused:
 reach `@RestControllerAdvice` — without it, Spring Security returns an empty body for exactly the two
 failures a client hits most.
 
-## 3c — still to do
+## 3c — role-based authorization ☑
 
-`USER` / `ADMIN` rules on every endpoint: catalog reads public, catalog writes admin, purchase user.
+### The matrix, verified end to end
+
+Every endpoint against all three identities:
+
+| Method | Path | anonymous | USER | ADMIN |
+|--------|------|-----------|------|-------|
+| GET | `/api/books` | 200 | 200 | 200 |
+| GET | `/api/books/{id}` | 200 | 200 | 200 |
+| GET | `/api/authors` | 200 | 200 | 200 |
+| GET | `/api/auth/me` | **401** | 200 | 200 |
+| POST | `/api/books/{id}/purchase` | **401** | 200 | 200 |
+| POST | `/api/books` | **401** | **403** | 201 |
+| PUT | `/api/books/{id}` | **401** | **403** | 200 |
+| DELETE | `/api/books/{id}` | **401** | **403** | 204 |
+| GET | `/api/whatever` (undeclared) | **401** | — | — |
+
+403 comes back in the same envelope as every other error:
+
+```json
+{"timestamp":"...","status":403,"error":"Forbidden",
+ "message":"You do not have permission to perform this action.","path":"/api/books"}
+```
+
+### Rules in one place, not scattered across annotations
+
+All of it lives in a single `authorizeHttpRequests` block. Authorization spread over dozens of
+`@PreAuthorize` annotations cannot be reviewed as a whole, and "which endpoints are public?" stops being
+a question anyone can answer by reading. Method security is the right tool for rules that depend on the
+*data* — "only the owner of this order" — which arrives in Step 5.
+
+Rules are evaluated top to bottom and **the first match wins**, so specific patterns must precede
+general ones. Misordering is silent: a broad rule placed early quietly swallows the narrow ones below.
+
+### Deny by default
+
+The last rule is `.anyRequest().authenticated()`, not `permitAll()`. A route added later is therefore
+closed until someone deliberately opens it, rather than public until someone notices. `GET /api/whatever`
+returning 401 is that policy working.
+
+### Roles are not hierarchical
+
+`ADMIN` does not "include" `USER` in Spring Security. `hasRole("USER")` on the purchase endpoint would
+have given an admin a **403**, which reads as a bug and is really a misunderstanding. Both roles are
+named explicitly:
+
+```java
+.requestMatchers(HttpMethod.POST, "/api/books/*/purchase").hasAnyRole("USER", "ADMIN")
+```
+
+A `RoleHierarchy` bean can establish `ADMIN > USER` if that is genuinely wanted; being explicit is
+clearer while there are two roles.
+
+### Bootstrapping the first admin
+
+Registration cannot create an ADMIN — that is the point of leaving `role` out of the request. So the
+first one has to be seeded: `db/seed/R__dev_admin_user.sql`, dev profile only, `admin` /
+`admin-dev-password`. The BCrypt hash in that file is real but publishing it costs nothing — the
+password is in the comment beside it and the account exists only in a throwaway local database. Real
+credentials come from the environment.
+
+### The bug the matrix caught
+
+`POST /api/books/{id}/purchase` and `PUT /api/books/{id}` returned **500** for authorized users:
+
+```
+NullPointerException: Cannot invoke "java.lang.Long.longValue()" because "current" is null
+```
+
+`V1__init.sql` declared `version BIGINT` with no default. Hibernate sets the initial value for entities
+it creates, so books added through the API were fine — but the dev seed inserts with plain SQL, and
+those rows landed with `version = NULL`. The first `UPDATE` of such a row then failed on the version
+increment.
+
+It survived Step 2e's 30-way concurrency testing precisely because that test created its book through
+the API. Only a write to a *seeded* book could trigger it, and nothing had done that until the
+authorization matrix exercised every endpoint against real rows.
+
+Fixed forward in `V5__book_version_not_null.sql` — backfill, then `SET DEFAULT 0`, then `SET NOT NULL`.
+V1 has already run elsewhere and must not be edited (D8). The `DEFAULT` matters most: it stops any
+future direct `INSERT` from recreating the same landmine.
+
+---
+
+# Step 3 complete
+
+| Part | Delivered |
+|------|-----------|
+| 3a | `users` table, registration, BCrypt hashing, no plaintext anywhere |
+| 3b | JWT issued on login, verified per request, proven against tampering |
+| 3c | Public / USER / ADMIN enforced on every endpoint, deny by default |
+
+## Next — Step 4
+
+Testing: unit tests with Mockito, `@WebMvcTest` and `@DataJpaTest` slices, and one full integration test
+on Testcontainers — which also removes the current requirement that PostgreSQL be running before
+`./mvnw test`. Deliberately before Step 5's refactor: tests written after a refactor only prove what the
+refactor produced.

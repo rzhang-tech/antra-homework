@@ -3,6 +3,7 @@ package com.example.bookstore.security;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.ProviderManager;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
@@ -46,13 +47,44 @@ public class SecurityConfig {
                         .authenticationEntryPoint(securityErrorWriter)   // 401
                         .accessDeniedHandler(securityErrorWriter))       // 403
 
+                /*
+                 * Authorization rules, evaluated top to bottom — the FIRST match wins, so the specific
+                 * patterns must precede the general ones. Putting `anyRequest()` anywhere but last is a
+                 * compile-time error, but ordering mistakes among the rest are silent: a broad rule
+                 * placed early quietly swallows the narrow ones below it.
+                 *
+                 * Keeping them in one block is deliberate. Authorization spread across dozens of
+                 * @PreAuthorize annotations cannot be reviewed as a whole, and "which endpoints are
+                 * public?" stops being a question anyone can answer by reading. Method security is the
+                 * right tool for rules that depend on the data — "only the owner of this order" —
+                 * which is a Step 5 problem.
+                 */
                 .authorizeHttpRequests(auth -> auth
                         // Registering and logging in cannot require being logged in.
-                        .requestMatchers("/api/auth/register", "/api/auth/login").permitAll()
-                        // The first genuinely protected route.
-                        .requestMatchers("/api/auth/me").authenticated()
-                        // Everything else stays open until 3c applies the real role rules.
-                        .anyRequest().permitAll())
+                        .requestMatchers(HttpMethod.POST, "/api/auth/register", "/api/auth/login")
+                            .permitAll()
+
+                        // Browsing the catalog is public — an anonymous visitor must be able to shop
+                        // before deciding to register.
+                        .requestMatchers(HttpMethod.GET, "/api/books", "/api/books/*", "/api/authors")
+                            .permitAll()
+
+                        // Buying requires an account. Both roles are named explicitly because Spring
+                        // Security roles are NOT hierarchical: hasRole("USER") alone would give an
+                        // ADMIN a 403 here, since ADMIN does not "include" USER unless a RoleHierarchy
+                        // says so.
+                        .requestMatchers(HttpMethod.POST, "/api/books/*/purchase")
+                            .hasAnyRole("USER", "ADMIN")
+
+                        // Managing the catalog is staff-only.
+                        .requestMatchers(HttpMethod.POST, "/api/books").hasRole("ADMIN")
+                        .requestMatchers(HttpMethod.PUT, "/api/books/*").hasRole("ADMIN")
+                        .requestMatchers(HttpMethod.DELETE, "/api/books/*").hasRole("ADMIN")
+
+                        // Deny by default. Anything not listed above needs a token — so a route added
+                        // later is closed until someone deliberately opens it, rather than public until
+                        // someone notices.
+                        .anyRequest().authenticated())
 
                 /*
                  * Our filter runs before UsernamePasswordAuthenticationFilter — the position, not that

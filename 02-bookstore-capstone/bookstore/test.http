@@ -228,3 +228,53 @@ Content-Type: application/json
   "username": "nobody-here",
   "password": "wrong-password"
 }
+
+### ---------------------------------------------------------------------------
+### Step 3c — role-based authorization
+### Run 28 and 29 to capture both tokens, then compare 30-33.
+### ---------------------------------------------------------------------------
+
+### 28. Log in as a customer
+# @name userLogin
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{ "username": "ruoyu", "password": "correct-horse-battery" }
+
+@userToken = {{userLogin.response.body.token}}
+
+### 29. Log in as the seeded dev admin
+# @name adminLogin
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{ "username": "admin", "password": "admin-dev-password" }
+
+@adminToken = {{adminLogin.response.body.token}}
+
+### 30. Catalog reads stay public — no token at all -> 200
+GET {{host}}/api/books
+
+### 31. A customer creating a book -> 403 (authenticated, but not permitted)
+POST {{host}}/api/books
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "title": "Not Allowed", "isbn": "NOPE-1", "price": 9.99, "stock": 1 }
+
+### 32. The same request as admin -> 201
+POST {{host}}/api/books
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{ "title": "Admin Only Book", "isbn": "ADM-1", "price": 9.99, "stock": 1 }
+
+### 33. Buying requires an account, either role -> 200
+POST {{host}}/api/books/1/purchase
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "quantity": 1 }
+
+### 34. An undeclared route is closed by default -> 401
+GET {{host}}/api/whatever

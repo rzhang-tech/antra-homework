@@ -8,14 +8,15 @@ step created a problem it solves, and the Git history is meant to show that prog
 
 ## Status
 
-Currently at **Step 3 of 11** — 3a-3b done (registration, BCrypt, JWT) — see [docs/roadmap.md](docs/roadmap.md) for the full plan and where each
+Currently at **Step 4 of 11** — see [docs/roadmap.md](docs/roadmap.md) for the full plan and where each
 technology enters.
 
 | Step | Delivers | Status |
 |------|----------|--------|
 | 1 | Monolith skeleton — Book CRUD, layering, validation, AOP | ☑ done |
 | 2 | PostgreSQL, indexes, transactions, N+1, optimistic locking | ☑ done |
-| 3–11 | Security · Testing · Microservices · Config · Kafka · Gateway · AWS · K8s · CI/CD | planned |
+| 3 | Spring Security, JWT, USER/ADMIN roles | ☑ done |
+| 4–11 | Testing · Microservices · Config · Kafka · Gateway · AWS · K8s · CI/CD | planned |
 
 ## Layout
 
