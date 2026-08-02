@@ -8,6 +8,7 @@ import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.cloud.context.config.annotation.RefreshScope;
 import org.springframework.stereotype.Component;
 
 import javax.crypto.SecretKey;
@@ -41,6 +42,7 @@ import java.util.Optional;
  * rather than weeks.
  */
 @Component
+@RefreshScope
 @Slf4j
 public class JwtUtil {
 
@@ -61,6 +63,40 @@ public class JwtUtil {
      */
     private static final String CLAIM_USER_ID = "uid";
 
+    /*
+     * All three are captured once, in the constructor, and that is what @RefreshScope is here for.
+     *
+     * Without it, POST /actuator/refresh updates the Environment - the endpoint even reports
+     * `app.jwt.expiration-minutes` as changed - and this bean carries on minting sixty-minute tokens,
+     * because the value was read into a field when the bean was built. **The environment refreshing is
+     * not the same as anything refreshing**, and it is the single most misleading thing about config
+     * refresh.
+     *
+     * @RefreshScope makes this a lazy proxy: on refresh the instance is discarded, and the next call
+     * builds a new one from the current Environment. The cost is a proxy on every JWT operation and a
+     * rebuild on the first call after each refresh, which for a bean this small is nothing.
+     *
+     * <p>It took two changes, not one. With the annotation alone the rebuilt bean was still handed the
+     * same stale {@link JwtProperties}, because a record is bound through its constructor and the
+     * refresh machinery rebinds an existing instance. Measured at each stage, changing the configured
+     * expiry from 60 to 5 and logging in again:
+     *
+     * <pre>
+     *   no @RefreshScope, JwtProperties a record    env says 5, tokens 60
+     *   @RefreshScope,    JwtProperties a record    env says 5, tokens 60
+     *   @RefreshScope,    JwtProperties a class     env says 5, tokens  5
+     * </pre>
+     *
+     * <p>Two beans in a chain, and the refresh only lands when <em>both</em> can be rebuilt.
+     *
+     * ROTATING THE SIGNING KEY IS STILL NOT SAFE THIS WAY, and it is worth being precise about why,
+     * because it is the value this whole step was built for. Refresh reaches one service at a time.
+     * The instant user-service starts signing with a new key, every token already in a customer's
+     * browser - and every service still holding the old key - disagrees with it. Real rotation needs a
+     * verifier that accepts both keys for an overlap longer than the token lifetime, and a signer that
+     * switches only after every verifier has the new key. That is a code change (a key *set*, not a
+     * key), not a configuration change, and this platform does not have it.
+     */
     private final SecretKey key;
     private final Duration expiration;
     private final String issuer;

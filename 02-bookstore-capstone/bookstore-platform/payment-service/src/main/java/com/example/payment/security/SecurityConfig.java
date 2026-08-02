@@ -57,6 +57,8 @@ public class SecurityConfig {
                         .requestMatchers("/actuator/health", "/actuator/health/**",
                                 "/actuator/circuitbreakers", "/actuator/circuitbreakerevents").permitAll()
 
+                        .requestMatchers("/actuator/**").hasRole("ADMIN")
+
                         // Listing every order on the platform is staff-only. Declared before the
                         // general /api/orders rules because the first match wins.
                         .requestMatchers("/api/payments/**").hasAnyRole("USER", "ADMIN")

@@ -26,6 +26,20 @@ spring:
   cloud:
     openfeign:
       client:
+        # Lets the timeouts below change in a running process. Read the property's own description
+        # carefully - "enables options value refresh capability" - because it is narrower than it
+        # sounds: it refreshes Feign's Request.Options, and NOT the client's URL.
+        #
+        # Tested rather than assumed. `app.book-service.url` was pointed at a dead port, refresh was
+        # POSTed to order-service, and the endpoint duly reported `app.book-service.url` as changed -
+        # after which order-service kept placing orders successfully against the old address. A
+        # @FeignClient url is resolved into the target when the client is built, and this flag does not
+        # move it.
+        #
+        # Which is the general lesson of 6c in one line: **/actuator/refresh always updates the
+        # Environment, and updating the Environment changes nothing by itself.** Something has to be
+        # able to read the value again.
+        refresh-enabled: true
         config:
           default:
             # A BUG THIS STEP FOUND. These lived in order-service's and payment-service's
@@ -68,7 +82,7 @@ management:
         # (`app.jwt.secret` matches), but /actuator/env still discloses the full shape of the
         # configuration, and /actuator/refresh is a POST that changes a running process. Step 8's
         # gateway routes no /actuator/** from outside; until then these are localhost-only in practice.
-        include: health,info,refresh,env,metrics
+        include: health,info,refresh,env,loggers,metrics
   endpoint:
     health:
       show-details: always

@@ -40,7 +40,8 @@ class UserServiceImplTest {
     @Mock private AuthenticationManager authenticationManager;
     @Mock private JwtUtil jwtUtil;
 
-    // A record, so it is constructed rather than mocked — there is no behaviour to stub.
+    // Constructed rather than mocked — there is no behaviour to stub. (It stopped being a record
+    // in Step 6c so that /actuator/refresh can rebind it; the all-args constructor survived for this.)
     private final JwtProperties jwtProperties = new JwtProperties("x".repeat(64), 60, "bookstore");
 
     private UserServiceImpl userService;

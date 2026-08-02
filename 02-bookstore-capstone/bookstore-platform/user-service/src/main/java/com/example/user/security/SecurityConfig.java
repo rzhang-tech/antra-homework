@@ -45,6 +45,22 @@ public class SecurityConfig {
                         .accessDeniedHandler(securityErrorWriter))
 
                 .authorizeHttpRequests(auth -> auth
+                        /*
+                         * Actuator, split by what each endpoint can do (Step 6c).
+                         *
+                         * /actuator/health stays open because the thing that calls it cannot carry a
+                         * token: a Kubernetes liveness probe has no credentials, and a health check
+                         * that answers 401 is a pod that never becomes ready.
+                         *
+                         * Everything else needs ADMIN. /actuator/refresh is a POST that re-reads
+                         * configuration and rebinds beans in a running process, and /actuator/env
+                         * discloses the whole shape of the configuration. Leaving those on the same
+                         * "internal network, so no token" reasoning as /health confuses "safe to read
+                         * from a probe" with "safe to let anyone invoke".
+                         */
+                        .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
+                        .requestMatchers("/actuator/**").hasRole("ADMIN")
+
                         // Registering and logging in cannot require being logged in.
                         .requestMatchers(HttpMethod.POST, "/api/auth/register", "/api/auth/login")
                             .permitAll()

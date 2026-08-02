@@ -86,7 +86,7 @@ management:
         # Extends the shared list with the breaker endpoints. Circuit state has to be observable: a
         # breaker whose state nobody can see turns an outage into a mystery, and "it started working
         # again on its own" is not an incident report.
-        include: health,info,refresh,env,metrics,circuitbreakers,circuitbreakerevents
+        include: health,info,refresh,env,loggers,metrics,circuitbreakers,circuitbreakerevents
   health:
     circuitbreakers:
       enabled: true

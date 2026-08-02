@@ -36,6 +36,19 @@
         </dependency>
 
         <!-- The client half of Step 6: fetches this service's configuration before any bean exists. -->
+        <!--
+          Added in Step 6c. user-service and book-service had no actuator at all - order-service and
+          payment-service acquired it in 5c only because they needed circuit-breaker endpoints. That
+          asymmetry stopped being tolerable once configuration became platform-wide: /actuator/refresh
+          is how a running service picks up a changed value, and /actuator/health is what Step 10's
+          readiness probe will call. Two of four services able to answer neither is not a deployment
+          story.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.cloud</groupId>
             <artifactId>spring-cloud-starter-config</artifactId>
