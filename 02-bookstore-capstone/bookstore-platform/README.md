@@ -701,6 +701,14 @@ What that buys and does not buy:
 - it **does not** stop anyone who can reach the config server from reading the plaintext, since that is
   precisely what it hands to clients. The key protects the repository, not the wire.
 
+> **And in this repository the key is written down two files away from the ciphertext it protects**,
+> which is precisely what `config-server/application.yml` says not to do. That is a deliberate,
+> stated exception rather than an oversight: a capstone has to be runnable by whoever clones it, and a
+> dev signing key nobody can decrypt makes the project un-startable. What is demonstrated here is the
+> *mechanism*; what is relied on in production is `${JWT_SECRET}` (D18), which keeps the secret out of
+> the repository entirely and therefore needs no such exception. Read this pairing as "how `{cipher}`
+> works", not as "this repository's dev key is protected".
+
 **Production uses `${JWT_SECRET}`.** Placeholders are *not* resolved by the config server — verified:
 
 ```

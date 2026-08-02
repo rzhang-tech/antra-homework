@@ -375,6 +375,14 @@ nobody can start.
 not assumed. It serves the literal `${JWT_SECRET}`, so the same file works for a Kubernetes Secret in
 Step 10 with no change at all.
 
+**Where this repository does not live up to its own rule.** `ENCRYPT_KEY` is documented in
+`bookstore-platform/README.md` and `test-platform.http`, in the same repository as the ciphertext —
+so the encryption protects nothing *here*. Stated rather than quietly true: a capstone has to be
+runnable by whoever clones it, and the alternative is a project that cannot start until someone is
+handed a key out of band. The dev key protects a dev secret, so the exception costs nothing real; it
+would be indefensible for any value that mattered, and it is why production uses placeholders instead
+of encryption rather than as well as it.
+
 **Not solved.** Rotating the key is still not a configuration change. Refresh reaches one service at a
 time, so the moment user-service signs with a new key every token in flight and every service still
 holding the old key disagrees with it. Real rotation needs a verifier that accepts both keys for longer
