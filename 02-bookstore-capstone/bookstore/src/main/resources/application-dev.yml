@@ -23,3 +23,10 @@ logging:
   level:
     com.example.bookstore: DEBUG            # makes the LoggingAspect's argument logging visible
     org.hibernate.orm.jdbc.bind: TRACE      # show the values bound into prepared statements
+
+app:
+  jwt:
+    # DEV ONLY, and committed knowingly. This key signs nothing that matters — a token minted against a
+    # local throwaway database. It is here so `git clone && docker compose up && mvnw spring-boot:run`
+    # works with no setup. The prod profile has no default and fails to start without JWT_SECRET.
+    secret: w4HvWMieqVUX1LJpx/wVR+yANNMPgD/dwfEySBsQuZyr7nej+tEV7aZkrzB12Ip3

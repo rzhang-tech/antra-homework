@@ -182,3 +182,49 @@ Content-Type: application/json
   "password": "correct-horse-battery",
   "role": "ADMIN"
 }
+
+### ---------------------------------------------------------------------------
+### Step 3b — login and JWT
+### Run 22 first; the @token variable is captured from its response.
+### ---------------------------------------------------------------------------
+
+### 22. Log in -> 200 with a signed token
+# @name login
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{
+  "username": "ruoyu",
+  "password": "correct-horse-battery"
+}
+
+@token = {{login.response.body.token}}
+
+### 23. The current user, identified by the token -> 200
+GET {{host}}/api/auth/me
+Authorization: Bearer {{token}}
+
+### 24. Same endpoint without a token -> 401
+GET {{host}}/api/auth/me
+
+### 25. A token that is not one -> 401
+GET {{host}}/api/auth/me
+Authorization: Bearer not.a.token
+
+### 26. Wrong password -> 401, deliberately the same message as 27
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{
+  "username": "ruoyu",
+  "password": "wrong-password"
+}
+
+### 27. A username that does not exist -> 401, byte-identical to 26
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{
+  "username": "nobody-here",
+  "password": "wrong-password"
+}

@@ -6,6 +6,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -83,6 +84,22 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.CONFLICT)
                 .body(ErrorResponse.of(409, "Conflict",
                         "The request conflicts with existing data", request.getRequestURI()));
+    }
+
+    /**
+     * A failed login.
+     *
+     * <p>Deliberately one message for both "no such user" and "wrong password". Distinguishing them
+     * turns the login endpoint into a username oracle: an attacker learns which accounts exist and can
+     * then concentrate password guessing on the real ones.
+     */
+    @ExceptionHandler(AuthenticationException.class)
+    public ResponseEntity<ErrorResponse> handleAuthentication(AuthenticationException ex,
+                                                              HttpServletRequest request) {
+        log.debug("Failed authentication on {}: {}", request.getRequestURI(), ex.getMessage());
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                .body(ErrorResponse.of(401, "Unauthorized",
+                        "Invalid username or password", request.getRequestURI()));
     }
 
     /** Raised when an {@code @Valid @RequestBody} fails Bean Validation. */

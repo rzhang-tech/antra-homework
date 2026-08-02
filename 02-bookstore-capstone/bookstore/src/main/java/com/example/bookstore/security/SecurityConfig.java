@@ -1,37 +1,40 @@
 package com.example.bookstore.security;
 
+import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.ProviderManager;
+import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
-/**
- * Step 3a: the security starter is on the classpath, so Spring Security is active — and its defaults
- * would lock every endpoint behind a login form and a password printed to the console. This config
- * replaces those defaults with ones appropriate to a REST API.
- *
- * <p>Authentication and authorization rules arrive in 3b and 3c. Right now every route is open, exactly
- * as it was before the starter was added; the only change is that the framework is wired in and ready.
- */
 @Configuration
+@RequiredArgsConstructor
 public class SecurityConfig {
+
+    private final JwtAuthenticationFilter jwtAuthenticationFilter;
+    private final SecurityErrorWriter securityErrorWriter;
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         return http
                 /*
-                 * CSRF protection defends against a browser being tricked into submitting a form using
-                 * cookies it already holds. It is disabled here because this API is stateless and will
-                 * authenticate with a Bearer token in Step 3b — a token the browser does not attach
-                 * automatically, which is what makes the attack impossible in the first place.
-                 * Disabling it on a cookie-authenticated app would be a serious mistake.
+                 * CSRF protection defends against a browser being tricked into submitting a request
+                 * using cookies it already holds. It is disabled because this API is stateless and
+                 * authenticates with a Bearer token — which the browser does not attach automatically,
+                 * so the attack has nothing to ride on. Disabling it on a cookie-authenticated app
+                 * would be a serious mistake.
                  */
                 .csrf(csrf -> csrf.disable())
 
-                // No HTTP session. Nothing about a request is remembered between requests; from 3b the
-                // token carries the identity. This is what lets the service scale horizontally later —
-                // any instance can serve any request, with no sticky sessions or shared session store.
+                // No HTTP session: nothing about a request is remembered between requests, and the
+                // token carries the identity. This is what lets any instance serve any request — no
+                // sticky sessions, no shared session store, and the precondition for Steps 8 and 10.
                 .sessionManagement(session ->
                         session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
 
@@ -39,9 +42,41 @@ public class SecurityConfig {
                 .formLogin(form -> form.disable())
                 .httpBasic(basic -> basic.disable())
 
-                // 3c replaces this with the real rules.
-                .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
+                .exceptionHandling(ex -> ex
+                        .authenticationEntryPoint(securityErrorWriter)   // 401
+                        .accessDeniedHandler(securityErrorWriter))       // 403
+
+                .authorizeHttpRequests(auth -> auth
+                        // Registering and logging in cannot require being logged in.
+                        .requestMatchers("/api/auth/register", "/api/auth/login").permitAll()
+                        // The first genuinely protected route.
+                        .requestMatchers("/api/auth/me").authenticated()
+                        // Everything else stays open until 3c applies the real role rules.
+                        .anyRequest().permitAll())
+
+                /*
+                 * Our filter runs before UsernamePasswordAuthenticationFilter — the position, not that
+                 * specific filter, is what matters. It has to execute before the authorization check so
+                 * that the SecurityContext is already populated when the rules above are evaluated.
+                 */
+                .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class)
 
                 .build();
+    }
+
+    /**
+     * The manager the login endpoint calls.
+     *
+     * <p>{@code DaoAuthenticationProvider} pairs the {@link CustomUserDetailsService} with the
+     * {@link PasswordEncoder}: load the stored hash by username, then verify the submitted password
+     * against it. It also hashes a dummy password when the user does not exist, so login takes
+     * comparable time either way and response timing does not reveal which usernames are real.
+     */
+    @Bean
+    public AuthenticationManager authenticationManager(UserDetailsService userDetailsService,
+                                                       PasswordEncoder passwordEncoder) {
+        DaoAuthenticationProvider provider = new DaoAuthenticationProvider(userDetailsService);
+        provider.setPasswordEncoder(passwordEncoder);
+        return new ProviderManager(provider);
     }
 }

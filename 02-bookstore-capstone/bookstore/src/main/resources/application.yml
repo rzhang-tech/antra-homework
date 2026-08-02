@@ -11,3 +11,11 @@ server:
   port: 8080
   error:
     include-stacktrace: never   # never leak internals; GlobalExceptionHandler owns the error body
+
+app:
+  jwt:
+    # How long a token stays valid. Short enough that a stolen token expires soon, long enough that a
+    # user is not re-authenticating constantly. A refresh-token flow is the usual way to have both;
+    # it is out of scope here.
+    expiration-minutes: 60
+    issuer: bookstore

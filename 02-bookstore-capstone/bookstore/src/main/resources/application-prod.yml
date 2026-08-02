@@ -17,3 +17,9 @@ spring:
 logging:
   level:
     com.example.bookstore: INFO
+
+app:
+  jwt:
+    # No default. If JWT_SECRET is unset the application refuses to start, which is the correct
+    # behaviour: a service that silently falls back to a known signing key issues forgeable tokens.
+    secret: ${JWT_SECRET}

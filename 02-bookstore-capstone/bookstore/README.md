@@ -545,6 +545,105 @@ role. On a privilege level, that is a security bug that leaves no trace in the d
 | plaintext password in logs | none |
 | same password, two users | different hashes |
 
-## 3b–3c — still to do
+## 3b — JWT: issued on login, checked on every request ☑
 
-JWT issued on login and validated by a filter · `USER` / `ADMIN` rules on every endpoint.
+| File | Purpose |
+|------|---------|
+| `config/JwtProperties.java` | `app.jwt.*`, validated at startup |
+| `security/JwtUtil.java` | mint and verify tokens |
+| `security/CustomUserDetailsService.java` | loads the user for **login only** |
+| `security/JwtAuthenticationFilter.java` | header → SecurityContext, once per request |
+| `security/SecurityErrorWriter.java` | 401/403 in the same JSON envelope as everything else |
+| `security/SecurityConfig.java` | stateless chain, filter placement, `AuthenticationManager` |
+| `dto/LoginRequestDto`, `LoginResponseDto` | in and out |
+
+### What a token actually is
+
+Three base64url segments joined by dots. Decoding the one this server issued:
+
+```
+header    { "alg": "HS512" }
+payload   { "sub": "ruoyu", "role": "USER", "iss": "bookstore",
+            "iat": 1785639122, "exp": 1785642722 }
+signature bjgHOvC79n8uZ8yMDWUW5BQOPQDj_1Fok...   (86 chars)
+```
+
+**The first two segments are encoded, not encrypted.** Anyone holding the token can read them — the
+decode above used nothing but base64. A JWT protects *integrity*, not confidentiality: the signature
+proves the claims have not been altered since this server signed them. Nothing secret goes in a token.
+
+That is also why no session store is needed. The server does not remember issuing the token; it
+recomputes the signature from the payload with its own key, and a match proves authenticity. Any
+instance can verify any token, which is the precondition for scaling out and for the Step 8 gateway.
+
+### Proven, not assumed
+
+| Attack | Result |
+|--------|--------|
+| Valid token on `/api/auth/me` | 200 |
+| No token | 401 |
+| **Payload edited to `"role": "ADMIN"`, signature untouched** | **401** |
+| Invented token (`not.a.token`) | 401 |
+| Correct username, wrong password | 401 `"Invalid username or password"` |
+| Username that does not exist | 401 — **byte-identical response** |
+
+The third row is the one that matters. Changing `role` to `ADMIN` in the payload is trivial — but the
+signature no longer matches the modified payload, and the request is rejected. That is the entire
+security model in one test.
+
+### The username oracle, and timing
+
+Login returns one message for both failures. Distinguishing "no such user" from "wrong password" hands
+an attacker a list of real accounts to concentrate on.
+
+Response time can leak the same thing: if a missing user returns instantly while a real one costs a
+100 ms BCrypt comparison, the message no longer matters. `DaoAuthenticationProvider` hashes a dummy
+password when the user is absent, specifically to close that channel. Measured over 8 attempts each:
+
+```
+existing user, wrong password : 74.6 ms
+user that does not exist      : 69.2 ms
+```
+
+Close enough to carry no signal. Hand-rolled `if (user == null) return 401;` would have shown the
+difference plainly — which is why `AuthenticationManager` does the comparison rather than our own code.
+
+### Where the secret lives
+
+| Profile | Value |
+|---------|-------|
+| `dev` | a literal in `application-dev.yml`, committed knowingly — it signs tokens for a throwaway local database, and its presence means `clone && docker compose up && mvnw spring-boot:run` needs no setup |
+| `prod` | `${JWT_SECRET}` with **no default** — the application refuses to start without it |
+
+The absence of a production default is deliberate. A service that quietly falls back to a known signing
+key issues tokens anyone can forge, and nothing about it looks broken.
+
+`JwtProperties` is `@Validated`, so a missing or under-length secret fails at startup rather than on the
+first login. HS256 needs 256 bits of key material; the constraint enforces it in characters.
+
+### Two design decisions worth defending
+
+**The filter never rejects anything.** A missing, malformed, or expired token leaves the context empty
+and the request continues as anonymous. The authorization rules then decide — 401 on a protected route,
+200 on a public one. Rejecting inside the filter would break every public endpoint for anyone carrying
+an expired token.
+
+**Identity is built from the token's claims, with no database lookup.** That is what makes the design
+stateless, and it is what will let the Step 8 gateway validate tokens with no database at all. The cost
+is staleness: a user deleted or demoted keeps whatever the token says until it expires. Short expiry is
+the mitigation; a revocation list is the real answer if one is ever needed.
+
+### 401 versus 403
+
+Worth stating precisely, because they are routinely confused:
+
+- **401 Unauthorized** — "I do not know who you are." No token, or an invalid one. Authenticating may help.
+- **403 Forbidden** — "I know who you are, and you may not do this." Valid token, wrong role. Re-authenticating changes nothing.
+
+`SecurityErrorWriter` implements both, because these rejections happen inside the filter chain and never
+reach `@RestControllerAdvice` — without it, Spring Security returns an empty body for exactly the two
+failures a client hits most.
+
+## 3c — still to do
+
+`USER` / `ADMIN` rules on every endpoint: catalog reads public, catalog writes admin, purchase user.
