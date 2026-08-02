@@ -3,6 +3,7 @@ package com.example.bookstore.controller;
 import com.example.bookstore.dto.BookRequestDto;
 import com.example.bookstore.dto.BookResponseDto;
 import com.example.bookstore.dto.PageResponseDto;
+import com.example.bookstore.dto.PurchaseRequestDto;
 import com.example.bookstore.service.BookService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -63,6 +64,16 @@ public class BookController {
     @PutMapping("/{id}")
     public BookResponseDto update(@PathVariable Long id, @Valid @RequestBody BookRequestDto request) {
         return bookService.update(id, request);
+    }
+
+    /**
+     * Sell copies of a book. Returns 409 if stock is insufficient, or if a concurrent purchase won the
+     * race for the same rows (optimistic-lock failure) — in both cases the client may re-read and retry.
+     */
+    @PostMapping("/{id}/purchase")
+    public BookResponseDto purchase(@PathVariable Long id,
+                                    @Valid @RequestBody PurchaseRequestDto request) {
+        return bookService.purchase(id, request.quantity());
     }
 
     @DeleteMapping("/{id}")

@@ -22,5 +22,14 @@ public interface BookService {
 
     BookResponseDto update(Long id, BookRequestDto request);
 
+    /**
+     * Sell {@code quantity} copies, decrementing stock.
+     *
+     * <p>The first multi-step write in the project: read the current stock, check it, write the new
+     * value. Between the read and the write another transaction can do exactly the same thing — which
+     * is what {@code @Version} on {@link com.example.bookstore.entity.Book} exists to catch.
+     */
+    BookResponseDto purchase(Long id, int quantity);
+
     void delete(Long id);
 }

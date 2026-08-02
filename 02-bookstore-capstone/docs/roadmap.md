@@ -8,8 +8,8 @@ Legend: ☐ not started · ◐ in progress · ☑ done
 | Step | What it delivers | Key technologies | Status |
 |------|------------------|------------------|--------|
 | 1 | Monolith skeleton: Book CRUD, clean layering, AOP logging | Spring Boot, Spring Web, Lombok, Spring AOP | ☑ |
-| 2 | Real data layer: PostgreSQL, indexes, transactions, N+1 fix | Spring Data JPA, Flyway, PostgreSQL, `@Version` | ◐ |
-| 3 | Auth & security: register/login, JWT, USER/ADMIN roles | Spring Security, JJWT, BCrypt | ☐ |
+| 2 | Real data layer: PostgreSQL, indexes, transactions, N+1 fix | Spring Data JPA, Flyway, PostgreSQL, `@Version` | ☑ |
+| 3 | Auth & security: register/login, JWT, USER/ADMIN roles | Spring Security, JJWT, BCrypt | ◐ |
 | 4 | Testing: unit, web slice, repo slice, integration | JUnit 5, Mockito, Testcontainers | ☐ |
 | 5 | Split into microservices, each with its own DB | OpenFeign, Resilience4j | ☐ |
 | 6 | Central configuration | Spring Cloud Config Server | ☐ |

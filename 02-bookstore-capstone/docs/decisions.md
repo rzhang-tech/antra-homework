@@ -187,6 +187,34 @@ respect that mattered.
 
 ---
 
+## D11 — Optimistic locking on stock, with the database as the final word
+
+**Decision.** `@Version` on `Book`, and 409 for every concurrency conflict —
+`ObjectOptimisticLockingFailureException`, `InsufficientStockException`, and
+`DataIntegrityViolationException` alike.
+
+**Why optimistic.** Conflicts on any one book are rare. `@Version` costs nothing when nobody is
+competing and only makes the loser retry. `SELECT ... FOR UPDATE` would serialise every purchase of a
+book whether or not there was contention — the right tool when conflicts are the norm, the wrong one
+here.
+
+**Why `@Transactional` was not enough.** A transaction is atomicity, not isolation from a concurrent
+read-modify-write. Under READ COMMITTED two transactions may both read `stock = 20` and both write `19`.
+`@Version` turns the write into `UPDATE ... WHERE id = ? AND version = ?`, so the late committer matches
+zero rows and is rolled back.
+
+**Verified, not assumed.** 30 concurrent single-copy purchases against stock 30: 5 succeeded, 25 got
+409, final stock exactly 25. The arithmetic is the assertion — without `@Version` successes would exceed
+deductions.
+
+**Two layers, deliberately.** The application checks (`existsByIsbn`, `stock >= quantity`) because it
+can give a precise message. The database constrains (unique index, `CHECK (stock >= 0)`, version match)
+because it cannot be raced or bypassed. The application explains; the database guarantees. Handling
+`DataIntegrityViolationException` is what makes the second layer return 409 rather than 500 — closing
+the check-then-act gap flagged in the Step 1 review.
+
+---
+
 ## D5 — Cross-service references are plain IDs, not foreign keys
 
 **Decision.** `order_item.book_id` and `orders.user_id` are plain `BIGINT` columns with no FK constraint.

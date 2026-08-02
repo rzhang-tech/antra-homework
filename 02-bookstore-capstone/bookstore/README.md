@@ -374,6 +374,89 @@ Inserting the same 20,000 rows, measured on this database:
 **4.4× slower writes**, plus disk. That is the trade every index makes, and why "add an index" is a
 decision rather than a reflex — an index nothing queries is pure cost.
 
-## 2e — still to do
+## 2e — optimistic locking under real concurrency ☑
 
-`@Version` optimistic locking under concurrent writes.
+`Book` has carried `@Version` since Step 1, but nothing in the API ever performed a read-modify-write,
+so the column never did anything. `POST /api/books/{id}/purchase` is the first operation that reads
+stock, checks it, and writes it back — and therefore the first that two clients can race.
+
+### Why `@Transactional` alone is not enough
+
+A transaction makes the three steps atomic against a crash. It does **not** stop two concurrent
+transactions from both reading `stock = 20` and both writing `19`. Under PostgreSQL's default
+READ COMMITTED isolation that is permitted, and the result is a **lost update**: two copies sold, one
+deducted.
+
+`@Version` closes it. Hibernate does not write a bare `UPDATE`; it writes:
+
+```sql
+update book set author_id=?, cover_url=?, isbn=?, price=?, stock=?, title=?, version=?
+where id=? and version=?
+```
+
+The second transaction to commit matches **zero rows**, because the first already moved `version`.
+Hibernate raises `ObjectOptimisticLockingFailureException`, the transaction rolls back, and the client
+gets 409.
+
+### Measured
+
+[`scripts/concurrent-purchase.mjs`](../scripts/concurrent-purchase.mjs) creates a book with stock 30 and
+fires 30 single-copy purchases through `Promise.all`:
+
+```
+HTTP status tally: { '200': 5, '409': 25 }
+final stock = 25
+expected    = 30 - 5 = 25
+OK — no lost updates: every successful purchase is accounted for in the stock.
+```
+
+The arithmetic is the assertion. 5 succeeded, 25 lost the race, and stock fell by exactly 5. Without
+`@Version` the successes would outnumber the deductions and the two figures would diverge.
+
+A first attempt at this demo used 19 backgrounded `curl` processes and produced 19 successes and zero
+conflicts — process startup is far slower than the transaction, so the requests never overlapped. It
+looked like proof that the locking was unnecessary. `Promise.all` in a single process was needed to make
+the requests genuinely simultaneous.
+
+### Optimistic, not pessimistic
+
+The alternative is `SELECT ... FOR UPDATE`, which locks the row so the second transaction waits. That is
+the right tool when conflicts are *common* — the loser waits a moment instead of failing. Here conflicts
+on any one book are rare, so a pessimistic lock would serialise every purchase of that book whether or
+not anyone was competing. Optimistic locking costs nothing in the common case and only makes the loser
+retry.
+
+### The Step 1 race condition, now closed
+
+The Step 1 review flagged that `create()` does a check-then-act — `existsByIsbn(...)` then `save(...)` —
+so two concurrent requests with the same ISBN could both pass the check. The database's unique
+constraint caught the second, but as `DataIntegrityViolationException`, which no handler mapped: the
+client saw **500** instead of 409.
+
+`GlobalExceptionHandler` now maps it. Verified with 20 concurrent creates of the same ISBN:
+
+```
+{ '201': 1, '409': 19 }        rows actually in the database: 1
+```
+
+The application-level check is still worth keeping — it produces a precise message ("A book with isbn X
+already exists") in the common case. The handler covers the narrow window the check cannot close. Both
+layers, same as the `CHECK (stock >= 0)` constraint in 2a: the application explains, the database
+guarantees.
+
+---
+
+# Step 2 complete
+
+| Part | Delivered |
+|------|-----------|
+| 2a | PostgreSQL in Docker, schema owned by Flyway, data survives restarts |
+| 2b | `Author` entity, `Book -> Author` relation |
+| 2c | N+1 reproduced and fixed — 6 queries to 1, 7 to 2 |
+| 2d | Three justified indexes, `EXPLAIN ANALYZE` against the application's real SQL |
+| 2e | `@Version` optimistic locking proven under 30-way concurrency |
+
+## Next — Step 3
+
+Spring Security and JWT: register and login, BCrypt password hashing, a stateless filter chain, and
+`USER` / `ADMIN` roles. Catalog reads stay public; catalog writes become admin-only.

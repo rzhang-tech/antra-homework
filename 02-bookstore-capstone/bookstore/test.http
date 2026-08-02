@@ -114,3 +114,26 @@ GET {{host}}/api/authors
 
 ### 14. The same data, the naive way -> 1 + N queries (6 with the seed data)
 GET {{host}}/api/authors?naive=true
+
+### ---------------------------------------------------------------------------
+### Step 2e — purchase and optimistic locking
+### For the concurrency demo run: node scripts/concurrent-purchase.mjs 30 30
+### ---------------------------------------------------------------------------
+
+### 15. Buy 2 copies -> 200, stock decremented
+POST {{host}}/api/books/1/purchase
+Content-Type: application/json
+
+{ "quantity": 2 }
+
+### 16. Buy more than the shelf holds -> 409 with the exact numbers
+POST {{host}}/api/books/1/purchase
+Content-Type: application/json
+
+{ "quantity": 99999 }
+
+### 17. A non-positive quantity is a validation error -> 400
+POST {{host}}/api/books/1/purchase
+Content-Type: application/json
+
+{ "quantity": 0 }

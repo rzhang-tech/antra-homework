@@ -7,12 +7,9 @@ things actually hit during the build rather than assembled at the end.
 
 **Known gaps, deliberately deferred**
 
-- **The ISBN uniqueness check has a race condition.** `BookServiceImpl.create` and `.update` do a
-  check-then-act: `existsByIsbn(...)` and then `save(...)`. Two concurrent requests creating the same
-  ISBN can both pass the check; the database's unique constraint then rejects the second one with a
-  `DataIntegrityViolationException`, which no handler maps — so the client sees 500 instead of 409.
-  Deferred to Step 2, where a real PostgreSQL makes the failure reproducible and the fix (a
-  `DataIntegrityViolationException` handler as a backstop) can be demonstrated rather than asserted.
+- ~~**The ISBN uniqueness check has a race condition.**~~ Fixed in Step 2e. `GlobalExceptionHandler` now
+  maps `DataIntegrityViolationException` to 409, closing the check-then-act gap. Verified with 20
+  concurrent creates of the same ISBN: 1×201, 19×409, exactly one row written.
 
 - **Keyword search will not scale.** `findByTitleContainingIgnoreCase` produces `LIKE '%keyword%'`. The
   leading wildcard makes a B-tree index on `title` unusable, so this is a full table scan on any real

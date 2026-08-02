@@ -6,6 +6,7 @@ import com.example.bookstore.dto.PageResponseDto;
 import com.example.bookstore.entity.Author;
 import com.example.bookstore.entity.Book;
 import com.example.bookstore.exception.DuplicateResourceException;
+import com.example.bookstore.exception.InsufficientStockException;
 import com.example.bookstore.exception.ResourceNotFoundException;
 import com.example.bookstore.repository.AuthorRepository;
 import com.example.bookstore.repository.BookRepository;
@@ -74,6 +75,33 @@ public class BookServiceImpl implements BookService {
         book.setAuthor(resolveAuthor(request.authorId()));
         // No explicit save() call: `book` is a managed entity inside this transaction, so Hibernate
         // flushes the changes on commit (dirty checking).
+        return BookResponseDto.from(book);
+    }
+
+    /**
+     * Read stock, check it, write it back — a classic read-modify-write.
+     *
+     * <p>{@code @Transactional} makes the three steps atomic against a crash, but on its own it does
+     * <em>not</em> stop two concurrent transactions from both reading stock = 1 and both writing 0.
+     * That is a lost update, and PostgreSQL's default READ COMMITTED isolation permits it.
+     *
+     * <p>What stops it is the {@code @Version} column. Hibernate emits
+     * {@code UPDATE book SET stock = ?, version = 6 WHERE id = ? AND version = 5} — so the second
+     * transaction to commit matches zero rows, Hibernate raises an optimistic-lock failure, and the
+     * transaction rolls back. The caller gets a 409 and can retry against the now-current stock.
+     *
+     * <p>Optimistic rather than pessimistic ({@code SELECT ... FOR UPDATE}) because conflicts on a book
+     * are rare: it costs nothing in the common case and only makes the loser retry. A pessimistic lock
+     * serialises every purchase of the same book whether or not anyone is competing for it.
+     */
+    @Override
+    @Transactional
+    public BookResponseDto purchase(Long id, int quantity) {
+        Book book = getOrThrow(id);
+        if (book.getStock() < quantity) {
+            throw new InsufficientStockException(id, quantity, book.getStock());
+        }
+        book.setStock(book.getStock() - quantity);
         return BookResponseDto.from(book);
     }
 
