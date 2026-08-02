@@ -456,7 +456,95 @@ guarantees.
 | 2d | Three justified indexes, `EXPLAIN ANALYZE` against the application's real SQL |
 | 2e | `@Version` optimistic locking proven under 30-way concurrency |
 
-## Next — Step 3
+---
 
-Spring Security and JWT: register and login, BCrypt password hashing, a stateless filter chain, and
-`USER` / `ADMIN` roles. Catalog reads stay public; catalog writes become admin-only.
+# Step 3 — Authentication & Security
+
+Split into three parts: storing users safely, issuing and checking tokens, then enforcing roles.
+
+## 3a — users, registration, BCrypt ☑
+
+No JWT yet. This part answers one question only: **how does a password get stored?**
+
+| File | Purpose |
+|------|---------|
+| `V4__add_users.sql` | `users` table — `CHECK (role IN ('USER','ADMIN'))`, unique username and email |
+| `entity/Role.java` | `USER` / `ADMIN` enum |
+| `entity/User.java` | the entity; the field is `passwordHash`, never `password` |
+| `repository/UserRepository.java` | `findByUsername`, `existsBy*` |
+| `dto/RegisterRequestDto.java` | validated input, with a masked `toString` |
+| `dto/UserResponseDto.java` | output — no hash, ever |
+| `config/PasswordEncoderConfig.java` | `BCryptPasswordEncoder(10)` |
+| `service/UserServiceImpl.java` | hashes the password, assigns the role |
+| `controller/AuthController.java` | `POST /api/auth/register` |
+| `security/SecurityConfig.java` | stateless chain; all routes still open until 3c |
+
+### Why BCrypt and not SHA-256
+
+SHA-256 is built to be **fast**, which is precisely wrong for passwords: a modern GPU computes billions
+per second, so a stolen table of SHA-256 hashes is a dictionary attack away from being a table of
+passwords. BCrypt is deliberately slow, and its cost is tunable — hardware improvements are answered by
+raising the work factor rather than by changing algorithm.
+
+The 158 ms this endpoint takes is not a performance problem; it is the feature.
+
+It also salts automatically. Two users registering the same password:
+
+```
+alice  $2a$10$6vzzr38wasaS3vAlMziJIuvRACVZK..Yl94WjaYCL5tn5nIXIHJFe
+bob    $2a$10$K.SIMAHkJSQEHyA6nIJ0Tu5tkA2ZsP/.FuVPn8W7adhkP8r1hlIl6
+```
+
+Different hashes. That defeats rainbow tables and stops the database revealing who shares a password
+with whom. The salt lives inside the string, so no separate column is needed:
+
+```
+$2a$10$N9qo8uLOickgx2ZMRZoMye IjZAgcfl7p92ldGxad68LJZdL17lhWy
+ │   │  └──── 22-char salt ──┘ └──────── 31-char hash ───────┘
+ │   └── cost: 2^10 rounds
+ └────── algorithm version
+```
+
+### The security bug this step nearly shipped
+
+`LoggingAspect` logs every service method's arguments, and a record's generated `toString` includes
+every component. `UserServiceImpl.register(RegisterRequestDto)` would therefore have written **the
+plaintext password** into the application log at DEBUG — from where it reaches log aggregation,
+backups, and support tickets.
+
+Fixed at the source by overriding `toString` on the DTO, so no caller anywhere can print it:
+
+```
+-> UserServiceImpl.register(..) args=[RegisterRequestDto[username=ruoyu, email=ruoyu@example.com, password=****]]
+```
+
+Verified by grepping the whole log for the password used in testing: no match.
+
+### Two more things the request deliberately does not accept
+
+**`role`.** If a client could send it, anyone could register as ADMIN. The server assigns `USER`.
+
+**A password longer than 72 characters.** BCrypt only reads the first 72 bytes, so longer passwords are
+silently truncated and two sharing a 72-byte prefix become the same password. Rejecting them is honest;
+accepting them quietly is not.
+
+### `EnumType.STRING`, not the default
+
+`@Enumerated(EnumType.ORDINAL)` — the default — stores the enum's *position*: `USER` as 0, `ADMIN` as 1.
+Inserting a constant into the middle of the enum later would silently reassign every existing row's
+role. On a privilege level, that is a security bug that leaves no trace in the data.
+
+### Verified
+
+| Case | Result |
+|------|--------|
+| `POST /api/auth/register` | 201, hash stored as `$2a$10$...` |
+| duplicate username | 409 |
+| duplicate email | 409 |
+| short password / bad email / short username | 400 with all three field errors |
+| plaintext password in logs | none |
+| same password, two users | different hashes |
+
+## 3b–3c — still to do
+
+JWT issued on login and validated by a filter · `USER` / `ADMIN` rules on every endpoint.

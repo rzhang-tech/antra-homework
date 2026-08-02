@@ -45,6 +45,12 @@
             <artifactId>spring-boot-starter-aop</artifactId>
         </dependency>
 
+        <!-- Step 3: authentication. Brings in BCryptPasswordEncoder and the SecurityFilterChain. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+
         <!-- Step 2: real PostgreSQL, running in Docker (see ../docker-compose.yml) -->
         <dependency>
             <groupId>org.postgresql</groupId>

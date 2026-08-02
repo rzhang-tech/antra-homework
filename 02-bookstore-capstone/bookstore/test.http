@@ -137,3 +137,48 @@ POST {{host}}/api/books/1/purchase
 Content-Type: application/json
 
 { "quantity": 0 }
+
+### ---------------------------------------------------------------------------
+### Step 3a — registration
+### ---------------------------------------------------------------------------
+
+### 18. Register a customer -> 201. The response never contains the hash.
+POST {{host}}/api/auth/register
+Content-Type: application/json
+
+{
+  "username": "ruoyu",
+  "email": "ruoyu@example.com",
+  "password": "correct-horse-battery"
+}
+
+### 19. Same username again -> 409
+POST {{host}}/api/auth/register
+Content-Type: application/json
+
+{
+  "username": "ruoyu",
+  "email": "different@example.com",
+  "password": "another-password"
+}
+
+### 20. Invalid input -> 400 listing every field that failed
+POST {{host}}/api/auth/register
+Content-Type: application/json
+
+{
+  "username": "ab",
+  "email": "not-an-email",
+  "password": "short"
+}
+
+### 21. role is not accepted from the client — this registers as USER, not ADMIN
+POST {{host}}/api/auth/register
+Content-Type: application/json
+
+{
+  "username": "wannabe-admin",
+  "email": "wannabe@example.com",
+  "password": "correct-horse-battery",
+  "role": "ADMIN"
+}

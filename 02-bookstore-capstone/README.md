@@ -8,7 +8,7 @@ step created a problem it solves, and the Git history is meant to show that prog
 
 ## Status
 
-Currently at **Step 3 of 11** — see [docs/roadmap.md](docs/roadmap.md) for the full plan and where each
+Currently at **Step 3 of 11** — 3a done (users, registration, BCrypt) — see [docs/roadmap.md](docs/roadmap.md) for the full plan and where each
 technology enters.
 
 | Step | Delivers | Status |
