@@ -1,0 +1,26 @@
+# analytics-service, all profiles.
+
+server:
+  # /actuator/health only. No API, same as notification-service.
+  port: 8086
+
+app:
+  kafka:
+    groups:
+      # A DIFFERENT NAME FROM notification-service'S, and that single difference is Step 7b.
+      #
+      # Same name would mean the two services shared one group: Kafka would give each partition to
+      # exactly one of them, so roughly a third of orders would be confirmed but not counted and
+      # another third counted but not confirmed. Nothing would error. The bug would look like
+      # "analytics is missing some orders" and would be invisible with one instance of each running
+      # against a one-partition topic.
+      #
+      # Different names mean two independent readers of the same stream, each with its own offsets,
+      # each able to fall behind, restart, or replay from the beginning without touching the other.
+      analytics: analytics-service
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health

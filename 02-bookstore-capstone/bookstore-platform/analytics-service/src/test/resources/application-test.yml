@@ -1,0 +1,40 @@
+# The profile every test runs under.
+#
+# No config server: `on-profile: "!test"` in the main application.yml stops the fetch, and the flag
+# below stops spring-cloud-starter-config's "you have the starter and no spring.config.import" check.
+# See Step 6 in bookstore-platform/README.md for why both are needed.
+spring:
+  cloud:
+    config:
+      enabled: false
+  kafka:
+    consumer:
+      # NOT a copy of the config repo for tidiness - the suite failed without it, and the failure is
+      # the one the shared config's comment warns about.
+      #
+      # Tests do not read the config server, so this consumer fell back to Kafka's default of `latest`:
+      # start from the end of the topic and ignore anything published before joining. The first test
+      # sent its message a moment before the container finished its initial rebalance, so that message
+      # was skipped in silence and the test timed out waiting; the second test's message arrived after
+      # assignment and passed. One test failing and one passing for the same code is exactly what this
+      # setting's absence looks like.
+      auto-offset-reset: earliest
+
+    # @EmbeddedKafka publishes the broker it started under this property. Pointing at localhost:9092
+    # instead would make the suite pass only on a machine where docker compose happens to be up, and
+    # fail in CI - the same coupling Testcontainers removed for the databases.
+    bootstrap-servers: ${spring.embedded.kafka.brokers}
+
+app:
+  kafka:
+    topics:
+      order-placed: bookstore.order.placed
+    groups:
+      # A group name per test class would be tidier still, but this suite has one consumer and
+      # @EmbeddedKafka starts a fresh broker per context - there are no offsets to collide with.
+      analytics: analytics-service-test
+
+logging:
+  level:
+    org.apache.kafka: WARN
+    org.springframework.kafka: WARN
