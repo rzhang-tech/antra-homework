@@ -1,0 +1,129 @@
+package com.example.book.service;
+
+import com.example.book.dto.BookRequestDto;
+import com.example.book.dto.BookResponseDto;
+import com.example.book.dto.PageResponseDto;
+import com.example.book.entity.Author;
+import com.example.book.entity.Book;
+import com.example.book.exception.DuplicateResourceException;
+import com.example.book.exception.InsufficientStockException;
+import com.example.book.exception.ResourceNotFoundException;
+import com.example.book.repository.AuthorRepository;
+import com.example.book.repository.BookRepository;
+import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
+
+@Service
+@RequiredArgsConstructor
+public class BookServiceImpl implements BookService {
+
+    /**
+     * Constructor injection (via Lombok's {@code @RequiredArgsConstructor} on a final field) rather than
+     * {@code @Autowired} on the field: the dependency is immutable, impossible to forget, and can be
+     * passed in directly by a unit test with no Spring context.
+     */
+    private final BookRepository bookRepository;
+    private final AuthorRepository authorRepository;
+
+    @Override
+    @Transactional(readOnly = true)
+    public PageResponseDto<BookResponseDto> findAll(String keyword, Pageable pageable) {
+        Page<Book> books = StringUtils.hasText(keyword)
+                ? bookRepository.searchByTitle(keyword.trim(), pageable)
+                : bookRepository.findAll(pageable);
+        return PageResponseDto.from(books, BookResponseDto::from);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public BookResponseDto findById(Long id) {
+        return BookResponseDto.from(getOrThrow(id));
+    }
+
+    @Override
+    @Transactional
+    public BookResponseDto create(BookRequestDto request) {
+        if (StringUtils.hasText(request.isbn()) && bookRepository.existsByIsbn(request.isbn())) {
+            throw new DuplicateResourceException("A book with isbn " + request.isbn() + " already exists");
+        }
+        Book book = Book.builder()
+                .title(request.title())
+                .isbn(request.isbn())
+                .price(request.price())
+                .stock(request.stock())
+                .author(resolveAuthor(request.authorId()))
+                .build();
+        return BookResponseDto.from(bookRepository.save(book));
+    }
+
+    @Override
+    @Transactional
+    public BookResponseDto update(Long id, BookRequestDto request) {
+        Book book = getOrThrow(id);
+        if (StringUtils.hasText(request.isbn())
+                && bookRepository.existsByIsbnAndIdNot(request.isbn(), id)) {
+            throw new DuplicateResourceException("A book with isbn " + request.isbn() + " already exists");
+        }
+        book.setTitle(request.title());
+        book.setIsbn(request.isbn());
+        book.setPrice(request.price());
+        book.setStock(request.stock());
+        book.setAuthor(resolveAuthor(request.authorId()));
+        // No explicit save() call: `book` is a managed entity inside this transaction, so Hibernate
+        // flushes the changes on commit (dirty checking).
+        return BookResponseDto.from(book);
+    }
+
+    /**
+     * Read stock, check it, write it back — a classic read-modify-write.
+     *
+     * <p>{@code @Transactional} makes the three steps atomic against a crash, but on its own it does
+     * <em>not</em> stop two concurrent transactions from both reading stock = 1 and both writing 0.
+     * That is a lost update, and PostgreSQL's default READ COMMITTED isolation permits it.
+     *
+     * <p>What stops it is the {@code @Version} column. Hibernate emits
+     * {@code UPDATE book SET stock = ?, version = 6 WHERE id = ? AND version = 5} — so the second
+     * transaction to commit matches zero rows, Hibernate raises an optimistic-lock failure, and the
+     * transaction rolls back. The caller gets a 409 and can retry against the now-current stock.
+     *
+     * <p>Optimistic rather than pessimistic ({@code SELECT ... FOR UPDATE}) because conflicts on a book
+     * are rare: it costs nothing in the common case and only makes the loser retry. A pessimistic lock
+     * serialises every purchase of the same book whether or not anyone is competing for it.
+     */
+    @Override
+    @Transactional
+    public BookResponseDto purchase(Long id, int quantity) {
+        Book book = getOrThrow(id);
+        if (book.getStock() < quantity) {
+            throw new InsufficientStockException(id, quantity, book.getStock());
+        }
+        book.setStock(book.getStock() - quantity);
+        return BookResponseDto.from(book);
+    }
+
+    @Override
+    @Transactional
+    public void delete(Long id) {
+        bookRepository.delete(getOrThrow(id));
+    }
+
+    private Book getOrThrow(Long id) {
+        return bookRepository.findById(id).orElseThrow(() -> ResourceNotFoundException.book(id));
+    }
+
+    /**
+     * A null author id means "no author on record" and is allowed; a non-null id that matches nothing is
+     * a client error, not a silently-ignored field.
+     */
+    private Author resolveAuthor(Long authorId) {
+        if (authorId == null) {
+            return null;
+        }
+        return authorRepository.findById(authorId)
+                .orElseThrow(() -> ResourceNotFoundException.author(authorId));
+    }
+}

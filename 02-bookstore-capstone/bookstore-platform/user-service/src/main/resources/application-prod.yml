@@ -1,0 +1,20 @@
+spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+  flyway:
+    locations: classpath:db/migration
+
+app:
+  jwt:
+    # No default: a service that silently falls back to a known signing key accepts forged tokens.
+    secret: ${JWT_SECRET}
+
+logging:
+  level:
+    com.example: INFO

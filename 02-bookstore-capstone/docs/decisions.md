@@ -215,6 +215,31 @@ the check-then-act gap flagged in the Step 1 review.
 
 ---
 
+## D12 — No shared "common" library between services
+
+**Decision.** `bookstore-platform` is a Maven aggregator that publishes no classes. Services duplicate
+the small cross-cutting pieces — `ErrorResponse`, the JWT filter, `LoggingAspect` — rather than
+importing them from a shared jar.
+
+**Why.** A shared domain or utility library is how a set of microservices quietly becomes a distributed
+monolith. One team's change to a shared class forces every other service to rebuild, retest and redeploy
+in lockstep — which is exactly the coupling the split was meant to remove. The services keep separate
+databases precisely so they can evolve separately; sharing their code puts the coupling back at a level
+that is harder to see.
+
+**The concrete case that settled it.** book-service's copied `JwtUtil` referenced user-service's `Role`
+enum. Sharing that enum would mean user-service could not add a role without breaking the catalog's
+security filter at runtime. Instead `roleOf` returns a `String`, and an unrecognised role matches no
+authorization rule and becomes a 403. Each service now decides for itself what it does with a value it
+does not recognise, which is what independent deployability actually requires.
+
+**Trade-off, honestly.** Some genuine duplication — roughly eight small files per service. That is the
+price, and it is cheap compared with a lockstep release train. Where duplication would become
+expensive (an OpenAPI client, say) the answer is a *generated* contract rather than a hand-shared
+class.
+
+---
+
 ## D5 — Cross-service references are plain IDs, not foreign keys
 
 **Decision.** `order_item.book_id` and `orders.user_id` are plain `BIGINT` columns with no FK constraint.

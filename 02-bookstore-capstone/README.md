@@ -17,7 +17,8 @@ technology enters.
 | 2 | PostgreSQL, indexes, transactions, N+1, optimistic locking | ☑ done |
 | 3 | Spring Security, JWT, USER/ADMIN roles | ☑ done |
 | 4 | Testing — 50 tests: unit, repository, web, integration | ☑ done |
-| 5–11 | Microservices · Config · Kafka · Gateway · AWS · K8s · CI/CD | planned |
+| 5 | Split into microservices | ◐ 5a done — user-service + book-service, separate databases |
+| 6–11 | Config · Kafka · Gateway · AWS · K8s · CI/CD | planned |
 
 ## Layout
 
@@ -28,7 +29,13 @@ technology enters.
 │   ├── roadmap.md        # the 11 steps, why they are in this order, status tracker
 │   ├── architecture.md   # current + target architecture diagrams (submission deliverable #4)
 │   └── decisions.md      # why each non-obvious choice was made (interview answers live here)
-└── bookstore/            # the monolith (Steps 1-4); Step 5 splits it into services
+├── bookstore-platform/   # the services (Steps 5-11)
+│   ├── user-service/     # owns users; the only service that issues tokens
+│   └── book-service/     # owns the catalog and stock; verifies tokens, never mints them
+├── docker-compose.yml    # one PostgreSQL per service
+└── scripts/              # benchmark data, concurrency demo
+
+The monolith (Steps 1-4) is preserved in Git at the `step-4-monolith` tag.
 ```
 
 ## Tech stack
@@ -47,27 +54,31 @@ technology enters.
 
 ## Run it
 
-Start the database first — the app no longer carries its own:
+Start both databases first:
 
 ```bash
 docker compose up -d
 ```
 
-Then the application:
+Then each service, in its own terminal:
 
 ```bash
-cd bookstore && ./mvnw spring-boot:run
+cd bookstore-platform/user-service && ../mvnw spring-boot:run
 ```
 
-Starts on `http://localhost:8080` under the `dev` profile. On first boot Flyway creates the schema from
-`db/migration` and loads five demo books from `db/seed`; on later boots it reports "up to date" and the
-data persists across restarts.
+```bash
+cd bookstore-platform/book-service && ../mvnw spring-boot:run
+```
+
+user-service listens on 8081, book-service on 8082. See
+[bookstore-platform/test-platform.http](bookstore-platform/test-platform.http) for requests that cross
+the boundary.
 
 Run the tests — these need **nothing** running beforehand; Testcontainers starts and disposes of its
 own PostgreSQL:
 
 ```bash
-cd bookstore && ./mvnw test
+cd bookstore-platform && ./mvnw test
 ```
 
 ## API — Step 1

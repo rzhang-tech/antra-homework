@@ -1,0 +1,95 @@
+### The platform, across service boundaries.
+###
+### Start both databases and both services first:
+###   docker compose up -d                                    (from 02-bookstore-capstone/)
+###   cd bookstore-platform/user-service && ../mvnw spring-boot:run
+###   cd bookstore-platform/book-service && ../mvnw spring-boot:run
+###
+### The point of this file is what the per-service tests deliberately cannot cover: a token minted by
+### user-service on port 8081 being accepted by book-service on port 8082, without the two ever
+### talking to each other.
+
+@userService = http://localhost:8081
+@bookService = http://localhost:8082
+
+### ---------------------------------------------------------------------------
+### user-service (8081) — identity
+### ---------------------------------------------------------------------------
+
+### 1. Register a customer -> 201
+POST {{userService}}/api/auth/register
+Content-Type: application/json
+
+{
+  "username": "shopper",
+  "email": "shopper@example.com",
+  "password": "correct-horse-battery"
+}
+
+### 2. Log in as that customer
+# @name userLogin
+POST {{userService}}/api/auth/login
+Content-Type: application/json
+
+{ "username": "shopper", "password": "correct-horse-battery" }
+
+@userToken = {{userLogin.response.body.token}}
+
+### 3. Log in as the seeded dev admin
+# @name adminLogin
+POST {{userService}}/api/auth/login
+Content-Type: application/json
+
+{ "username": "admin", "password": "admin-dev-password" }
+
+@adminToken = {{adminLogin.response.body.token}}
+
+### 4. The current user -> 200
+GET {{userService}}/api/auth/me
+Authorization: Bearer {{userToken}}
+
+### ---------------------------------------------------------------------------
+### book-service (8082) — catalog
+###
+### Every request below crosses a service boundary: the token came from 8081 and
+### is being verified on 8082. Nothing on this port can read the users table, and
+### no call is made back to user-service. Only the shared signing key is involved.
+### ---------------------------------------------------------------------------
+
+### 5. Browsing is public — no token at all -> 200
+GET {{bookService}}/api/books
+
+### 6. Authors with their books, one query -> 200
+GET {{bookService}}/api/authors
+
+### 7. A customer creating a book -> 403 (authenticated on another service, still not permitted here)
+POST {{bookService}}/api/books
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "title": "Not Allowed", "isbn": "NOPE-1", "price": 9.99, "stock": 1 }
+
+### 8. The same request with the admin's token -> 201
+POST {{bookService}}/api/books
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{ "title": "Cross-Service Book", "isbn": "XS-1", "price": 19.99, "stock": 5 }
+
+### 9. Purchasing with the customer's token -> 200
+POST {{bookService}}/api/books/1/purchase
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "quantity": 1 }
+
+### 10. Purchasing anonymously -> 401
+POST {{bookService}}/api/books/1/purchase
+Content-Type: application/json
+
+{ "quantity": 1 }
+
+### 11. A token from 8081 is useless if tampered with — edit one character of the
+###     payload below by hand and this returns 401 rather than acting on it.
+GET {{bookService}}/api/books/1
+Authorization: Bearer {{userToken}}

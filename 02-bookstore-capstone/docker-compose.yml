@@ -1,31 +1,53 @@
-# Local infrastructure for the capstone. Step 2 needs only PostgreSQL; Kafka and the other services
-# join this file in Steps 7 and 10.
+# Local infrastructure for the platform.
 #
 #   docker compose up -d      start
 #   docker compose ps         check health
-#   docker compose down       stop (data survives — it lives in the named volume)
-#   docker compose down -v    stop AND delete the data, so Flyway rebuilds from V1 on next start
+#   docker compose down       stop (data survives in the named volumes)
+#   docker compose down -v    stop AND delete the data, so Flyway rebuilds from V1
+#
+# TWO PostgreSQL instances, not one server with two schemas. Database-per-Service means each service
+# owns its storage outright: separate process, separate credentials, separate port. book-service cannot
+# read the users table even by accident, because it has no route to that server and no password for it.
+# A shared server with two schemas would look the same in a diagram and enforce nothing.
+#
+# The obvious objection — "that is two containers to run a bookstore" — is correct, and is the actual
+# cost of the split. Step 10 makes it manageable.
 
 services:
-  postgres:
+  user-db:
     image: postgres:17-alpine
-    container_name: bookstore-postgres
+    container_name: bookstore-user-db
     environment:
-      POSTGRES_DB: bookstore
-      POSTGRES_USER: bookstore
-      POSTGRES_PASSWORD: bookstore
+      POSTGRES_DB: userdb
+      POSTGRES_USER: userdb
+      POSTGRES_PASSWORD: userdb
     ports:
-      # host:container — the app connects to localhost:5432 from outside Docker
-      - "5432:5432"
+      - "5433:5432"
     volumes:
-      # A named volume, so data survives `docker compose down` and container restarts.
-      # This is exactly why ddl-auto: create-drop is no longer acceptable.
-      - bookstore-pgdata:/var/lib/postgresql/data
+      - user-pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U bookstore -d bookstore"]
+      test: ["CMD-SHELL", "pg_isready -U userdb -d userdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  book-db:
+    image: postgres:17-alpine
+    container_name: bookstore-book-db
+    environment:
+      POSTGRES_DB: bookdb
+      POSTGRES_USER: bookdb
+      POSTGRES_PASSWORD: bookdb
+    ports:
+      - "5434:5432"
+    volumes:
+      - book-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bookdb -d bookdb"]
       interval: 5s
       timeout: 3s
       retries: 10
 
 volumes:
-  bookstore-pgdata:
+  user-pgdata:
+  book-pgdata:

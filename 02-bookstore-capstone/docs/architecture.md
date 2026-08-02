@@ -3,20 +3,31 @@
 Two views: where the project is **now**, and the **target** it is being built toward. Submission
 deliverable #4 is the target diagram.
 
-## Current state (Step 2a)
+## Current state (Step 5a)
 
-One Spring Boot application, three layers, a real PostgreSQL in Docker. Nothing distributed yet.
+Two services, two databases, no direct communication between them.
 
 ```mermaid
-flowchart LR
-    C[curl / Postman] -->|HTTP| CT[BookController]
-    CT --> SV[BookService]
-    SV --> RP[BookRepository]
-    RP --> DB[("PostgreSQL 17<br/>Docker + named volume")]
-    FW["Flyway<br/>db/migration"] -->|owns the schema| DB
-    AOP[LoggingAspect]-.->|@Around| SV
-    EH[GlobalExceptionHandler]-.->|@RestControllerAdvice| CT
+flowchart TB
+    C[curl / Postman]
+
+    C -->|"login :8081"| US["user-service<br/>issues JWTs"]
+    C -->|"Bearer token :8082"| BS["book-service<br/>verifies JWTs"]
+
+    US --- UDB[("PostgreSQL :5433<br/>userdb — users")]
+    BS --- BDB[("PostgreSQL :5434<br/>bookdb — book, author")]
+
+    KEY(["shared HMAC signing key"])
+    KEY -.->|signs with| US
+    KEY -.->|verifies with| BS
+
+    US -. "no network call, ever" .-> BS
 ```
+
+The dotted line between the services is the interesting part: **there isn't one**. book-service does not
+ask user-service whether a token is genuine — it recomputes the signature with the shared key. That is
+what makes the token stateless, and what will let the Step 8 gateway do the same check with no database
+and no upstream call.
 
 ## Target architecture (end of Step 11)
 

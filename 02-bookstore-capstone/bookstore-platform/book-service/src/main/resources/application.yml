@@ -1,0 +1,17 @@
+spring:
+  application:
+    name: book-service
+  profiles:
+    default: dev
+  jpa:
+    open-in-view: false
+
+server:
+  port: 8082
+  error:
+    include-stacktrace: never
+
+app:
+  jwt:
+    expiration-minutes: 60
+    issuer: bookstore
