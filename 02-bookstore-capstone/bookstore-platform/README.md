@@ -10,6 +10,7 @@ git checkout step-4-monolith
 
 | Service | Port | Database | State |
 |---------|------|----------|-------|
+| `config-server` | 8888 | none | ☑ 6a |
 | `user-service` | 8081 | `userdb` on 5433 | ☑ 5a |
 | `book-service` | 8082 | `bookdb` on 5434 | ☑ 5a |
 | `order-service` | 8083 | `orderdb` on 5435 | ☑ 5b |
@@ -22,6 +23,13 @@ docker compose up -d
 ```
 
 (from `02-bookstore-capstone/` — starts **four** PostgreSQL instances)
+
+**The config server starts first, and the other four will not start without it.** That is deliberate —
+see Step 6a — and it needs the encryption key, or the dev signing key in the repo cannot be decrypted:
+
+```bash
+cd config-server && ENCRYPT_KEY=dev-only-config-server-master-key-do-not-reuse ../mvnw spring-boot:run
+```
 
 ```bash
 cd user-service && ../mvnw spring-boot:run
@@ -48,7 +56,13 @@ Everything at once:
 ./mvnw test
 ```
 
-94 tests across the four services. Testcontainers supplies the databases, so nothing needs to be running.
+99 tests across the five modules. Testcontainers supplies the databases, and no test talks to the
+config server, so nothing needs to be running.
+
+Run `./mvnw clean` at least once after pulling Step 6: `target/classes` keeps a copy of every resource
+that was ever compiled, including the per-service `application-dev.yml` files this step deleted. A stale
+copy there is invisible, sits below the config server in precedence — and quietly becomes the fallback
+the moment the config server cannot supply a value. Found the hard way; see Step 6d.
 
 ---
 
@@ -494,8 +508,255 @@ details back: amount, timestamp, and confirmation the order existed.
 Every test of the slow path still passed. The shape generalises: **a fast path added for performance or
 idempotency is a second code path, and it needs every check the first one has.**
 
-## Next — Step 6
+---
 
-Four services now share a signing key as four copies of one literal, and each carries its own database
-URL, timeouts and resilience thresholds. Changing any of them means editing four files and restarting
-four services. Spring Cloud Config Server.
+# Step 6 — one place to change configuration, and the honest limits of that
+
+Four services shared a signing key as four copies of one literal, and each carried its own database URL,
+timeouts and resilience thresholds. Changing any of them meant editing four files and restarting four
+services — with a window in the middle where user-service signed with a key the others did not have.
+
+## What moved, and the one rule that decided it
+
+A service cannot fetch its configuration until it knows its own name and the address of the server
+holding it. **That is the bootstrap paradox, and everything else follows from it.** Those two facts, and
+nothing else, still ship inside each jar; `application-dev.yml` and `application-prod.yml` are gone from
+all four services.
+
+| Served by the config server | Stays in the jar |
+|---|---|
+| datasource URL, credentials | `spring.application.name` |
+| ports | the address of the config server |
+| the JWT signing key, issuer, expiry | Flyway migration **scripts** (`db/migration/*.sql`) |
+| Feign timeouts, resilience thresholds | |
+| log levels, actuator exposure | |
+
+Migration scripts stay with the service that owns the schema. They are versioned artefacts that must
+match the compiled entity classes; shipping `V3__add_column.sql` separately from the code that needs the
+column is how a deployment half-applies itself.
+
+## Property precedence is not what it looks like
+
+```
+GET /user-service/dev
+
+  user-service-dev.yml     wins
+  application-dev.yml      <- outranks the service's own file below
+  user-service.yml
+  application.yml          platform-wide default
+```
+
+**Profile beats specificity.** A key set in the shared `application-dev.yml` overrides the same key in
+`user-service.yml`, and the service file simply appears to be ignored, with no warning anywhere. This
+was measured against the running server rather than assumed, and `ConfigServerContractTest` pins it —
+the test exists precisely because the intuitive order is the wrong one.
+
+## Refuse to start rather than start wrong
+
+`spring.config.import` is **not** marked `optional:`, and `fail-fast: true`. A service that falls back
+to bundled defaults when the config server is unreachable comes up holding last release's signing key
+and reports itself healthy. A process that will not start is a visible, obviously-attributable failure;
+a process running on stale configuration is an invisible one.
+
+Fail-fast is not fail-instantly — a cold start races the config server, and Step 10 makes that routine.
+Measured with the server unreachable:
+
+```
+max-attempts 1     4.5 s
+max-attempts 6    31.2 s      <- 26.7 s of it backing off
+```
+
+**Do not trust the startup log's timestamps here.** Config data is loaded before the logging system
+exists, so those messages go through a `DeferredLog` and replay in a burst — six attempts appear two
+milliseconds apart, which reads exactly like a backoff that is not working. The wall clock is the only
+honest measurement.
+
+## Tests never talk to the config server
+
+Two separate mechanisms, both needed, for a reason worth knowing:
+
+- `on-profile: "!test"` on the import stops the **fetch**. Config-data imports resolve in an early
+  phase, before `application-test.yml` is visible, so disabling the client there could not have
+  prevented it.
+- `spring.cloud.config.enabled: false` in `application-test.yml` stops the **check** —
+  spring-cloud-starter-config refuses to start a context that has the starter on the classpath and no
+  `spring.config.import`. That check earns its keep in production, where what it catches is a service
+  quietly running on bundled defaults.
+
+The cost is that `application-test.yml` duplicates a few values the config repo also defines.
+Deliberate: the alternative is a test suite that cannot run unless another process is up.
+
+## A real bug, visible only once the files sat in one directory
+
+Feign's connect and read timeouts were set in order-service's and payment-service's
+`application-dev.yml` — and in **neither** `application-prod.yml`. Production was running on Feign's
+defaults, effectively "wait forever": exactly the failure mode Step 5b added them to prevent, disabled
+in the only environment where it matters. Two sub-steps of nobody noticing, because no single file ever
+showed both profiles side by side.
+
+That is a better argument for a config server than "less duplication".
+
+## A test that had been passing for the wrong reason
+
+`CatalogGatewayResilienceTest` was reading production's circuit-breaker thresholds by accident, because
+`src/main/resources/application.yml` is on the test classpath. Once those moved to the config server the
+test ran on Resilience4j's defaults — a 100-call window — and could no longer open a circuit at all.
+
+Fixed by pinning the thresholds in `application-test.yml`, not by pointing tests at the config server. A
+test asserting "the circuit opens on the sixth call" must own the numbers it asserts on, or it silently
+changes meaning the moment operations tunes a threshold for entirely good reasons.
+
+## Changing a value without restarting — and the three things that refused to
+
+`POST /actuator/refresh` re-fetches and rebinds. Measured on the running platform, changing
+`app.jwt.expiration-minutes` in the config repo and logging in again:
+
+```
+1. token lifetime, as configured        60 min
+2. config changed, no refresh yet       60 min
+3. POST /actuator/refresh               ["app.jwt.expiration-minutes"]
+4. next login, same process             5 min
+5. restored                             60 min
+```
+
+Log levels do the same with no code at all — DEBUG to WARN and back, through `/actuator/loggers`. That
+is the endpoint's most common real use: turning on debug logging during an incident without restarting
+the thing you are trying to observe.
+
+**The lesson of the whole sub-step, in one line: `/actuator/refresh` always updates the Environment, and
+updating the Environment changes nothing by itself.** Something has to be able to read the value again.
+Three demonstrations, all measured:
+
+| | result |
+|---|---|
+| `JwtUtil` captured expiry in its constructor | env says 5, tokens still 60 |
+| `@RefreshScope` added, `JwtProperties` still a record | env says 5, tokens still 60 |
+| `@RefreshScope`, `JwtProperties` a mutable class | env says 5, tokens 5 |
+
+A record binds through its constructor, and the refresh machinery rebinds an *existing* instance — so
+the rebuilt `JwtUtil` kept being handed the same stale properties. `JwtProperties` is now a mutable
+class in user-service only: **immutability traded for the ability to change a value without a restart**,
+deliberately, in the one service that needs it. Two beans in a chain, and refresh lands only when both
+can be rebuilt.
+
+`spring.cloud.openfeign.client.refresh-enabled` is the third. It refreshes Feign's `Request.Options` —
+the timeouts — and **not** the client URL, whatever the name suggests. Verified by pointing
+`app.book-service.url` at a dead port, refreshing, and watching order-service keep succeeding against
+the old address.
+
+### What still cannot be refreshed, and one that should not be
+
+`server.port` (Tomcat has bound it) and the datasource URL (Hikari has built the pool) need a restart,
+and that is fine — nobody re-ports a running service.
+
+**Rotating the signing key is not a refresh problem, and it is worth being precise about why**, because
+it is the value this entire step was built for. Refresh reaches one service at a time. The instant
+user-service signs with a new key, every token already in a customer's browser and every service still
+holding the old key disagrees with it. Real rotation needs a verifier that accepts both keys for longer
+than a token lives, and a signer that switches only once every verifier has the new one. That is a key
+*set*, which is a code change, not a configuration change. This platform does not have it.
+
+## Actuator, split by what each endpoint can do
+
+```
+/actuator/health      open      a Kubernetes probe carries no token, and a health check
+                                that answers 401 is a pod that never becomes ready
+everything else       ADMIN     /actuator/refresh is a POST that rebinds beans in a running
+                                process; /actuator/env discloses the whole configuration
+```
+
+Verified: no token gives 401, a USER token 403, an ADMIN token 200. user-service and book-service had no
+actuator dependency at all until this step — order-service and payment-service only acquired it in 5c
+for the circuit-breaker endpoints — and two of four services unable to answer a health check is not a
+deployment story.
+
+## Secrets: two mechanisms, because they solve different problems
+
+**Dev uses `{cipher}`.** The signing key in `application-dev.yml` is ciphertext; the config server holds
+the key in `ENCRYPT_KEY` and decrypts before serving, so no client needs the key or an extra dependency.
+
+What that buys and does not buy:
+
+- it **does** stop a config repository being a list of credentials in a Git history that everyone with
+  read access can browse — including after a value is rotated, because Git keeps the old one forever;
+- it **does not** stop anyone who can reach the config server from reading the plaintext, since that is
+  precisely what it hands to clients. The key protects the repository, not the wire.
+
+**Production uses `${JWT_SECRET}`.** Placeholders are *not* resolved by the config server — verified:
+
+```
+GET /user-service/prod
+  app.jwt.secret        -> ${JWT_SECRET}
+  spring.datasource.url -> ${DB_URL}
+```
+
+The client resolves them against its own environment, so the secret never sits in the repository, never
+travels over the wire, and never reaches the server's logs. Strictly stronger than encryption, and it is
+the mechanism that survives Step 10 unchanged — `${JWT_SECRET}` is exactly what a Kubernetes Secret
+mounted as an environment variable supplies.
+
+Starting the config server without `ENCRYPT_KEY` fails loudly in the right place, which was checked
+rather than assumed:
+
+```
+config server   WARN  Cannot decrypt key: app.jwt.secret
+                      serves it renamed to `invalid.app.jwt.secret`
+client          APPLICATION FAILED TO START
+                      Property: app.jwt.secret   Reason: app.jwt.secret must be set
+```
+
+`/encrypt` and `/decrypt` are unauthenticated, because this server has no security at all. Anything that
+can reach `/decrypt` can turn ciphertext back into a credential. It belongs on an internal network
+behind Step 8's gateway, and `/decrypt` is worth disabling outright once nothing needs it.
+
+## The bug that made all of the above nearly untrue
+
+That loud failure did not happen the first time it was tried. user-service started perfectly and minted
+working tokens against a config server that could not decrypt anything.
+
+`target/classes/application-dev.yml` — a compiled copy of a file deleted back in 6a. `spring-boot:run`
+puts `target/classes` on the classpath, Maven never removes resources that are no longer in `src`, and
+nothing anywhere reports it. Config server property sources outrank it, so every earlier measurement in
+this step remains valid; but the instant the config server could not supply the key, the ghost file
+supplied it instead, and fail-fast became fail-never.
+
+**A deleted configuration file is not gone until `mvn clean` runs.** The general shape is worth keeping:
+a stale artefact that is outranked in the normal case is invisible until exactly the failure case it
+would have masked.
+
+## How this maps to Kubernetes (Step 10)
+
+The Config Server is the classic Spring Cloud answer and is expected in interviews. It is not what most
+Kubernetes deployments use, and the mapping is close to one-to-one:
+
+| here | Kubernetes |
+|---|---|
+| `config-repo/*.yml` | a `ConfigMap` per service, plus one shared |
+| `{cipher}` values | a `Secret`, or an external store via the Secrets Store CSI driver |
+| `${JWT_SECRET}` placeholders | `env.valueFrom.secretKeyRef` — **unchanged**, which is the point |
+| `spring.config.import: configserver:` | nothing: the kubelet injects the values as env vars or files |
+| `POST /actuator/refresh` | a rolling restart, or a sidecar that watches the ConfigMap |
+
+The honest comparison: ConfigMaps need no extra service to run, no extra failure mode at startup, and no
+network hop — the config server is one more thing that must be up before anything else can start, which
+is precisely what `fail-fast` had to be designed around. What the config server has and ConfigMaps do
+not is **Git as the source of truth**: an author, a timestamp and a diff for every production
+configuration change, and revert as an ordinary operation. Enough teams run both that knowing which
+problem each one solves matters more than picking a winner.
+
+## What got worse
+
+- **A fifth process, and everything depends on it.** The config server is now a startup-order dependency
+  for the whole platform. Retry and fail-fast make its absence loud rather than harmless, which is the
+  right trade, but it is a new single point of failure and Step 10 has to make it highly available.
+- **"Where does this value come from?" now has four possible answers per service**, ordered by a rule
+  that is not the obvious one. `/actuator/env` is the only reliable way to answer it, which is why it is
+  exposed.
+- **Configuration and code can now drift apart.** A resilience threshold naming
+  `com.example.order.exception.ResourceNotFoundException` lives in a YAML file that no compiler checks;
+  rename the class and the config server will keep serving the old name perfectly happily.
+
+## Next — Step 7
+
+Placing an order still does everything synchronously, so the customer waits for every side effect and
+each new one couples another service to the order path. Kafka.

@@ -25,6 +25,33 @@ spring:
           # Override CONFIG_REPO when running the jar from anywhere else.
           search-locations: ${CONFIG_REPO:file:../config-repo}
 
+      # Encryption (Step 6d). The key itself comes from the ENCRYPT_KEY environment variable and is
+      # deliberately absent from this file - a master key committed next to the values it protects
+      # protects nothing.
+      #
+      #   ENCRYPT_KEY=... ../mvnw spring-boot:run
+      #   curl -X POST localhost:8888/encrypt -H 'Content-Type: text/plain' --data-binary 'the secret'
+      #   -> paste the result into the repo as  secret: '{cipher}<result>'
+      #
+      # The server decrypts before serving, so no client needs the key or any extra dependency. That
+      # is also the limit of what this buys: it keeps credentials out of a Git history that everyone
+      # with read access can browse forever, and it hands the plaintext to anything that can reach
+      # this server. Production uses `${ENV_VAR}` placeholders instead, which the server passes
+      # through unresolved - see config-repo/application-prod.yml.
+      #
+      # Start without ENCRYPT_KEY and the failure is loud in the right place, which was worth
+      # checking rather than assuming:
+      #
+      #   config server  WARN  Cannot decrypt key: app.jwt.secret
+      #                        serves it renamed to `invalid.app.jwt.secret`
+      #   client         APPLICATION FAILED TO START
+      #                        Property: app.jwt.secret  Reason: app.jwt.secret must be set
+      #
+      # /encrypt and /decrypt are unauthenticated, because this server has no security at all. On a
+      # laptop that is fine and in a real deployment it is not: anything that can reach /decrypt can
+      # turn any ciphertext back into a credential. The config server belongs on an internal network
+      # behind Step 8's gateway, and /decrypt is worth disabling outright once nothing needs it.
+
 server:
   port: 8888
 

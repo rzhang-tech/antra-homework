@@ -328,3 +328,67 @@ Authorization: Bearer {{userToken}}
 
 ### 40. Circuit state for the order-service dependency
 GET {{paymentService}}/actuator/circuitbreakers
+
+### ---------------------------------------------------------------------------
+### config-server (8888) — Step 6
+### ---------------------------------------------------------------------------
+###
+### Start it FIRST; the other four refuse to start without it (D17). It needs the
+### encryption key, or the dev signing key in the repo cannot be decrypted:
+###
+###   cd config-server && ENCRYPT_KEY=dev-only-config-server-master-key-do-not-reuse ../mvnw spring-boot:run
+
+@configServer = http://localhost:8888
+
+### 20. Exactly what user-service is handed on startup.
+### Note the ORDER of propertySources: user-service-dev.yml, then application-dev.yml, then
+### user-service.yml, then application.yml. Profile beats specificity — the shared dev file
+### outranks the service's own file, which is the opposite of what everyone assumes.
+GET {{configServer}}/user-service/dev
+
+### 21. The same service in prod. `${JWT_SECRET}` and `${DB_URL}` come back UNRESOLVED —
+### the config server is told the name of the secret, not the secret (D18).
+GET {{configServer}}/user-service/prod
+
+### 22. Each service gets its own database credentials and nobody else's.
+GET {{configServer}}/order-service/dev
+
+### 23. Encrypt a value for the repo. Paste the response in as  secret: '{cipher}<response>'
+POST {{configServer}}/encrypt
+Content-Type: text/plain
+
+some-value-that-should-not-be-readable-in-git
+
+### ---------------------------------------------------------------------------
+### Changing a value in a running service (Step 6c)
+### ---------------------------------------------------------------------------
+
+### 24. /actuator/health is open — a Kubernetes probe carries no token.
+GET {{userService}}/actuator/health
+
+### 25. /actuator/refresh is not. Without a token this is 401; with a USER token, 403.
+POST {{userService}}/actuator/refresh
+
+### 26. Re-read configuration and rebind. Returns the list of keys that changed.
+###
+### To see it do something: edit `app.jwt.expiration-minutes` in config-repo/application.yml,
+### send this, then log in again (request 2) and decode the token — `exp - iat` follows the new
+### value, in the same process, with no restart.
+###
+### To see it NOT do something: change `app.book-service.url` and refresh order-service. The
+### endpoint reports the key as changed and order-service keeps calling the old address, because
+### a @FeignClient URL is resolved when the client is built. Updating the Environment is not the
+### same as anything changing.
+POST {{userService}}/actuator/refresh
+Authorization: Bearer {{adminToken}}
+
+### 27. The most common real use: turn on debug logging without restarting the service you are
+### trying to observe. Change `logging.level.com.example` in config-repo/application-dev.yml,
+### refresh, then read it back here.
+GET {{userService}}/actuator/loggers/com.example
+Authorization: Bearer {{adminToken}}
+
+### 28. Where a value actually came from, when four files could have supplied it.
+### Credential-looking keys come back as ****** — actuator redacts them.
+GET {{userService}}/actuator/env/app.jwt.secret
+Authorization: Bearer {{adminToken}}

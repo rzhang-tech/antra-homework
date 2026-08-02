@@ -47,6 +47,25 @@ Migration *scripts* stay with the service that owns the schema. They are version
 match the compiled entity classes; shipping `V3__add_column.sql` separately from the code that needs the
 column is how a deployment half-applies itself.
 
+## Secrets
+
+Nothing readable in here is a credential.
+
+- **dev** — `app.jwt.secret` is a `{cipher}` value. The config server decrypts it before serving, using
+  a key it reads from `ENCRYPT_KEY` and never writes down. Produce one with:
+
+  ```bash
+  curl -X POST localhost:8888/encrypt -H 'Content-Type: text/plain' --data-binary 'the secret'
+  ```
+
+- **prod** — `${JWT_SECRET}`, `${DB_PASSWORD}` and friends are passed through **unresolved**. The config
+  server never sees the value; the client resolves it against its own environment. This is the mechanism
+  that becomes a Kubernetes Secret in Step 10, with these files unchanged.
+
+Encryption protects the repository — a Git history keeps every value forever, including after rotation.
+Placeholders protect everything: the repository, the wire, and the config server's logs. Use
+placeholders wherever something can populate an environment.
+
 ## Editing it
 
 The `native` backend (the local default) reads these files from disk, so a change takes effect on the

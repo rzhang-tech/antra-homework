@@ -53,7 +53,6 @@ class ConfigServerContractTest {
 
         assertThat(merged.path("spring.datasource.url").asText()).contains("5433/userdb");
         assertThat(merged.path("server.port").asInt()).isEqualTo(8081);
-        assertThat(merged.path("app.jwt.secret").asText()).isNotBlank();
         assertThat(merged.path("app.jwt.issuer").asText()).isEqualTo("bookstore");
     }
 
@@ -88,13 +87,32 @@ class ConfigServerContractTest {
     }
 
     @Test
-    @DisplayName("all four services are handed the same signing key")
+    @DisplayName("all four services are handed the same signing key, and only with the key to decrypt it")
     void theKeyEveryServiceMustAgreeOnIsOneValue() {
-        // The duplication Step 6 exists to remove: four byte-identical copies of this literal, which
-        // nothing enforced. If they ever drifted, user-service would mint tokens the other three
-        // rejected - and the symptom would be 401s, not a configuration error.
-        List<String> keys = List.of("user-service", "book-service", "order-service", "payment-service")
-                .stream()
+        // Two halves of one contract, and which half applies depends on how this JVM was started.
+        //
+        // The duplication Step 6 exists to remove is four byte-identical copies of one literal that
+        // nothing enforced: if they drifted, user-service would mint tokens the other three rejected,
+        // and the symptom would be 401s rather than a configuration error.
+        //
+        // Since 6d that literal is a `{cipher}` value, so the server can only produce it when it holds
+        // ENCRYPT_KEY. Both outcomes are worth pinning - the second one is the promise that a config
+        // server without its key discloses nothing rather than serving something half-usable.
+        List<String> serviceNames =
+                List.of("user-service", "book-service", "order-service", "payment-service");
+
+        if (System.getenv("ENCRYPT_KEY") == null) {
+            for (String name : serviceNames) {
+                ObjectNode config = mergedSourceFor("/" + name + "/dev");
+                assertThat(config.has("app.jwt.secret"))
+                        .as("no plaintext key without ENCRYPT_KEY")
+                        .isFalse();
+                assertThat(config.path("invalid.app.jwt.secret").asText()).isEqualTo("<n/a>");
+            }
+            return;
+        }
+
+        List<String> keys = serviceNames.stream()
                 .map(name -> mergedSourceFor("/" + name + "/dev").path("app.jwt.secret").asText())
                 .toList();
 

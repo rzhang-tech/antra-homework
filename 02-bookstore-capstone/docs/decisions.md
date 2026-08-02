@@ -329,6 +329,86 @@ all, is the real answer — both need the gateway from Step 8 to separate inside
 
 ---
 
+## D17 — A service refuses to start rather than start on defaults
+
+**Decision.** `spring.config.import` is not `optional:`, `spring.cloud.config.fail-fast` is `true`, and
+retry covers roughly 27 seconds of a config server being slow to come up.
+
+**Why.** The alternative is that an unreachable config server produces a running service configured from
+whatever happens to be bundled in its jar. That service comes up holding the wrong signing key, rejects
+every token on the platform, and reports itself healthy the whole time. **A process that will not start
+is a visible, obviously-attributable failure; a process running on stale configuration is an invisible
+one**, and someone spends the outage looking at the wrong service.
+
+**The retry exists because fail-fast is not fail-instantly.** On a cold start every service comes up at
+once and the config server may be seconds behind — a race Step 10's orchestration makes routine. Six
+attempts backing off from one second turns that race into a non-event. Measured with the server
+unreachable: 4.5 s with retry off, 31.2 s with it on.
+
+**Where this is not enough.** The startup dependency is real, and it is new. The config server is now a
+single point of failure for the whole platform's ability to *start* — not to run, since a running
+service keeps its configuration — and Step 10 has to make it highly available or accept that a config
+server outage plus a pod restart equals an outage.
+
+---
+
+## D18 — Two different mechanisms for secrets, because they solve different problems
+
+**Decision.** Dev keeps the signing key in the config repo as a `{cipher}` value the config server
+decrypts with a key from `ENCRYPT_KEY`. Production keeps it out of the config repo entirely, as a
+`${JWT_SECRET}` placeholder the *client* resolves against its own environment.
+
+**Why not just encryption.** The config server decrypts before serving, which is what makes it
+convenient — no client needs the key or an extra dependency. It is also the limit of what it protects.
+Anything that can reach the config server can read the plaintext, and `/decrypt` will convert any
+ciphertext back on request. Encryption keeps credentials out of a **Git history**, which matters more
+than it sounds: a repository keeps the value forever, including after it is rotated, and every developer
+with read access can browse it.
+
+**Why not just placeholders.** They are strictly stronger — the secret never enters the repository, the
+wire, or the server's logs; the config server is told the *name* of the secret, not the secret. But they
+push the problem to whatever populates the environment, which on a laptop is nothing, and a dev
+environment where every developer must first be handed a set of secrets out of band is a dev environment
+nobody can start.
+
+**The property that made this decision easy:** the config server does not resolve `${...}` — verified,
+not assumed. It serves the literal `${JWT_SECRET}`, so the same file works for a Kubernetes Secret in
+Step 10 with no change at all.
+
+**Not solved.** Rotating the key is still not a configuration change. Refresh reaches one service at a
+time, so the moment user-service signs with a new key every token in flight and every service still
+holding the old key disagrees with it. Real rotation needs a verifier that accepts both keys for longer
+than a token lives — a key *set*, which is code.
+
+---
+
+## D19 — Immutability given up in exactly one class, for refreshability
+
+**Decision.** `JwtProperties` in user-service is a mutable class with setters. Everywhere else,
+`@ConfigurationProperties` types stay records.
+
+**Why.** `POST /actuator/refresh` rebinds an *existing* bean. A record is bound through its constructor,
+so there is nothing to rebind — and `@RefreshScope` on the consumer does not help either, because the
+rebuilt consumer is handed the same stale record. Measured at each stage, changing the configured token
+expiry from 60 minutes to 5 and logging in again:
+
+```
+no @RefreshScope, JwtProperties a record    env says 5, tokens 60
+@RefreshScope,    JwtProperties a record    env says 5, tokens 60
+@RefreshScope,    JwtProperties a class     env says 5, tokens  5
+```
+
+**The trade, stated plainly:** immutability is the better default and was given up deliberately, in one
+class, for the ability to change a value without a restart. The setters exist for the binder; nothing in
+the codebase calls them, and anything that did would be changing configuration behind `JwtUtil`'s back.
+
+**The general rule this is an instance of.** `/actuator/refresh` always updates the Environment, and
+updating the Environment changes nothing by itself — something has to be able to read the value again.
+Two beans in a chain, and the refresh lands only when *both* can be rebuilt. The same reasoning explains
+why `spring.cloud.openfeign.client.refresh-enabled` refreshes Feign's timeouts and not its URL: the URL
+is resolved into the target when the client is built, and nothing rebuilds it.
+---
+
 ## D5 — Cross-service references are plain IDs, not foreign keys
 
 **Decision.** `order_item.book_id` and `orders.user_id` are plain `BIGINT` columns with no FK constraint.

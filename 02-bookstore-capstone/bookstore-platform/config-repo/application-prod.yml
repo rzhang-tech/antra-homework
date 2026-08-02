@@ -1,9 +1,20 @@
 # Production, shared by every service.
 #
-# `${...}` placeholders are NOT resolved by the config server. It serves the literal string
-# `${JWT_SECRET}` and the client resolves it against its own environment - so the secret never travels
-# over the wire, never sits in the config repository, and never appears in the server's logs. The
-# config server is told the *name* of the secret, not the secret.
+# `${...}` placeholders are NOT resolved by the config server - verified, not assumed:
+#
+#   GET /user-service/prod
+#     app.jwt.secret        -> ${JWT_SECRET}
+#     spring.datasource.url -> ${DB_URL}
+#
+# It serves the literal string and the client resolves it against its own environment. So in
+# production the secret never sits in the config repository, never travels over the wire, and never
+# appears in the config server's logs: the server is told the *name* of the secret, not the secret.
+#
+# This is deliberately a different mechanism from dev's `{cipher}`. Encryption keeps a credential out
+# of a Git history but still hands the plaintext to anyone who can reach the config server.
+# Placeholders keep it out of the config server entirely, which is strictly stronger - and it is the
+# mechanism that survives Step 10 unchanged, because `${JWT_SECRET}` is exactly what a Kubernetes
+# Secret mounted as an environment variable supplies.
 
 spring:
   jpa:

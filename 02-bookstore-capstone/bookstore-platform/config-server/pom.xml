@@ -30,6 +30,17 @@
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
 
+        <!--
+          Step 6d. Supplies the TextEncryptor behind /encrypt and /decrypt, and the ability to serve a
+          `{cipher}...` value decrypted. Without it the config server starts happily, answers
+          /encrypt with 404, and serves `{cipher}...` to clients verbatim - a service that then fails
+          on a signing key that is a literal string beginning with "{cipher}".
+        -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-rsa</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

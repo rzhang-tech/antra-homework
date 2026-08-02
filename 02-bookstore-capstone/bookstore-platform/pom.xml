@@ -38,6 +38,12 @@
     <properties>
         <java.version>21</java.version>
         <jjwt.version>0.13.0</jjwt.version>
+        <!--
+          Not managed by the Spring Cloud release train, so it is pinned here rather than left to
+          whatever the config server happens to resolve. It provides the TextEncryptor behind the
+          config server's /encrypt endpoint - see D18.
+        -->
+        <spring-security-rsa.version>1.1.5</spring-security-rsa.version>
         <!-- Release train aligned to Boot 3.5.x — see D1 -->
         <spring-cloud.version>2025.0.3</spring-cloud.version>
     </properties>
@@ -50,6 +56,11 @@
                 <version>${spring-cloud.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.security</groupId>
+                <artifactId>spring-security-rsa</artifactId>
+                <version>${spring-security-rsa.version}</version>
             </dependency>
             <dependency>
                 <groupId>io.jsonwebtoken</groupId>

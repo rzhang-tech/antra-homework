@@ -20,10 +20,21 @@ app:
     # Rotating it meant four edits and four restarts, with a window in the middle where tokens minted by
     # the new key were rejected by services still holding the old one.
     #
-    # It is one copy now. It is still plain text, which is a different problem and is Step 6d's.
+    # It is one copy now, and since 6d it is not readable. `{cipher}` marks a value the config server
+    # decrypts before serving, with a key it holds in the ENCRYPT_KEY environment variable and no
+    # client ever sees. Produced by POSTing the plaintext to the server's own /encrypt endpoint.
     #
-    # DEV ONLY.
-    secret: w4HvWMieqVUX1LJpx/wVR+yANNMPgD/dwfEySBsQuZyr7nej+tEV7aZkrzB12Ip3
+    # What this does and does not buy:
+    #
+    #   it does     stop a config repository being a list of credentials in a Git history that
+    #               everyone with read access can browse - including after the value is rotated,
+    #               because Git keeps the old one forever
+    #   it does not stop anyone who can reach this config server from reading the plaintext, since
+    #               that is precisely what it hands to clients. The key protects the repository, not
+    #               the wire, and the server itself is now the thing to protect
+    #
+    # DEV ONLY. Production does not use this mechanism at all - see application-prod.yml.
+    secret: '{cipher}8f664b261f44500bdaeae0c88d7f0438bf69823e078a050e6f352fb220946d8b0ed21616321619e0ba9d04651294a4b7e8fea1018c5a6c2ec4c1d54cbc5b098ff3ce34f8284c5c0623e8731e16032b242b5870e93549fb58ca8463481e867131'
 
 logging:
   level:
