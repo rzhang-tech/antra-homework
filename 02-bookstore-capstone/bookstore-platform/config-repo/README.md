@@ -47,6 +47,42 @@ Migration *scripts* stay with the service that owns the schema. They are version
 match the compiled entity classes; shipping `V3__add_column.sql` separately from the code that needs the
 column is how a deployment half-applies itself.
 
+## Before moving a value in here: check the tests
+
+**Tests do not read the config server.** Every service's `application-test.yml` sets
+`spring.cloud.config.enabled: false`, and the `configserver:` import is skipped under the `test` profile
+— deliberately, so the suite needs no second process. The consequence is a rule with teeth:
+
+> Moving a property into this directory **removes it from the test classpath**. If any test depends on
+> it, that test breaks — and the failure never mentions configuration.
+
+Do this before every move, from `bookstore-platform/`:
+
+```bash
+grep -rn "order-placed" --include="*.java" --include="*.yml" */src/test
+```
+
+**Search the leaf key, not the dotted path.** `app.kafka.topics.order-placed` finds nothing: YAML nests
+it, so the string never appears anywhere. The leaf name matches both forms — the nesting in a
+`application-test.yml` and the `${app.kafka.topics.order-placed}` inside a `@Value`. The first version
+of this rule shipped with the dotted path and would have found none of the three failures below.
+
+If it does, copy the value into that service's `src/test/resources/application-test.yml` in the same
+change. Duplication is correct here: a test that asserts "the circuit opens on the sixth call" must own
+the number it asserts on, or it silently changes meaning the moment operations tunes a threshold.
+
+This is written down because it was learned three times in two steps, and the symptom was different
+every time:
+
+| what moved | how it failed | what it looked like |
+|---|---|---|
+| Resilience4j thresholds | `CatalogGatewayResilienceTest` could no longer open a circuit | a resilience bug |
+| `auto-offset-reset` | one Kafka test passed, its neighbour timed out | a flaky test |
+| `app.kafka.topics.*` | context failed to start | `PlaceholderResolutionException` |
+
+None of the three says "the config server has this now". The grep above is two seconds and finds all of
+them.
+
 ## Secrets
 
 Nothing readable in here is a credential.
