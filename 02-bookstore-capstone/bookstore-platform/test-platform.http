@@ -392,3 +392,70 @@ Authorization: Bearer {{adminToken}}
 ### Credential-looking keys come back as ****** — actuator redacts them.
 GET {{userService}}/actuator/env/app.jwt.secret
 Authorization: Bearer {{adminToken}}
+
+### ---------------------------------------------------------------------------
+### Step 7 — the asynchronous half
+### ---------------------------------------------------------------------------
+###
+### Two more services, neither of which has an API:
+###
+###   cd notification-service && ../mvnw spring-boot:run     (8085)
+###   cd analytics-service    && ../mvnw spring-boot:run     (8086)
+###
+### Nothing below calls them. That is the point - they are driven entirely by what
+### order-service and payment-service publish, and the only way to see them work is
+### to read their logs or their metrics.
+
+@analytics = http://localhost:8086
+
+### 29. Place an order and WATCH THE CLOCK. The confirmation and the analytics tally happen
+### after this response has already been returned, in two other processes.
+###
+### Then stop notification-service, place three more, and start it again: all three
+### confirmations appear at once, with the original placedAt. A consumer being down is a
+### queue, not an outage.
+POST {{orderService}}/api/orders
+Content-Type: application/json
+Authorization: Bearer {{userToken}}
+
+{ "items": [ { "bookId": 7, "quantity": 2 } ] }
+
+### 30. Pay for it. payment-service publishes PaymentCompleted, and notification-service -
+### one consumer group, two topics, two event types - logs a RECEIPT as well as the earlier
+### CONFIRMATION.
+POST {{paymentService}}/api/payments
+Content-Type: application/json
+Authorization: Bearer {{userToken}}
+
+{ "orderId": 25, "amount": 20.00 }
+
+### 31. DLQ depth, as a metric. Zero is the healthy answer and the monitor stays silent for it.
+GET {{analytics}}/actuator/metrics/bookstore.dlq.depth
+
+### 32. Health only - these two services expose nothing else, because they have no security
+### filter chain and nothing to protect.
+GET {{analytics}}/actuator/health
+
+###
+### The parts that need the broker directly, not HTTP:
+###
+###   # who is reading what, and how far behind
+###   docker exec bookstore-kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+###     --bootstrap-server localhost:9092 --describe --all-groups
+###
+###   # redelivery: republish an OrderPlaced that has already been handled.
+###   # Both consumers log "already been counted / confirmed" and neither acts twice.
+###   docker exec -i bookstore-kafka /opt/kafka/bin/kafka-console-producer.sh \
+###     --bootstrap-server localhost:9092 --topic bookstore.order.placed \
+###     --property parse.key=true --property key.separator='|'
+###   25|{"orderId":25,"userId":2,"totalPrice":20.00,"items":[],"placedAt":"2026-08-02T18:18:36Z"}
+###
+###   # a poison message: valid JSON, wrong shape. It goes to the dead letter topic on the
+###   # FIRST attempt (a conversion failure is deterministic), and the next good message on
+###   # the same partition is processed half a second later.
+###   999|{"orderId":999,"userId":1,"totalPrice":"not-a-number","items":[],"placedAt":"2026-08-02T18:18:36Z"}
+###
+###   # what ended up there
+###   docker exec bookstore-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+###     --bootstrap-server localhost:9092 --from-beginning \
+###     --topic bookstore.order.placed.notification-service.DLT

@@ -19,8 +19,17 @@ app:
       # each able to fall behind, restart, or replay from the beginning without touching the other.
       analytics: analytics-service
 
+      # Read, not owned. DeadLetterMonitor watches every DLT on the platform including
+      # notification-service's, because a monitor that only watched its own would leave the other
+      # service's failures unobserved - which is the exact outcome a dead letter topic creates.
+      notification: notification-service
+
+    # Often enough that a stuck message is noticed within a minute, rarely enough that the AdminClient
+    # calls are free. In a real deployment this is a Prometheus scrape, not a timer inside a service.
+    dlq-check-interval-ms: 30000
+
 management:
   endpoints:
     web:
       exposure:
-        include: health
+        include: health,metrics

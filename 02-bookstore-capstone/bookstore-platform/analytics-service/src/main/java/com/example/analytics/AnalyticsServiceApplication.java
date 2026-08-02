@@ -2,6 +2,7 @@ package com.example.analytics;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * Counts what the shop sells. Reacts; never asked.
@@ -17,6 +18,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * twice looks exactly like revenue. Step 7c is about that.
  */
 @SpringBootApplication
+@EnableScheduling   // for DeadLetterMonitor
 public class AnalyticsServiceApplication {
 
     public static void main(String[] args) {

@@ -29,10 +29,16 @@ app:
   kafka:
     topics:
       order-placed: bookstore.order.placed
+      # Not consumed here - DeadLetterMonitor watches notification-service's DLT for it.
+      payment-completed: bookstore.payment.completed
     groups:
       # A group name per test class would be tidier still, but this suite has one consumer and
       # @EmbeddedKafka starts a fresh broker per context - there are no offsets to collide with.
       analytics: analytics-service-test
+      notification: notification-service-test
+    # Long enough that the monitor never runs during a test; what it reports is not what these tests
+    # are about, and an AdminClient poll racing an embedded broker's shutdown is pure noise.
+    dlq-check-interval-ms: 3600000
 
 logging:
   level:

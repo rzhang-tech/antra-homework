@@ -409,6 +409,98 @@ why `spring.cloud.openfeign.client.refresh-enabled` refreshes Feign's timeouts a
 is resolved into the target when the client is built, and nothing rebuilds it.
 ---
 
+## D20 — Events for everyone else; calls for what has to happen
+
+**Decision.** payment-service publishes `PaymentCompleted` *and* keeps calling order-service
+synchronously to mark the order paid, with 5e's never-giving-up recovery job intact. Placing an order
+publishes `OrderPlaced` and calls nobody.
+
+**Why.** **An event tells people something happened; a call makes something happen.** order-service must
+know the money arrived before it hands over books, and "eventually, once some consumer catches up" is
+not a guarantee to put between a customer and their order. Replacing the call with an event would have
+looked like better architecture and quietly weakened a guarantee the business depends on.
+
+Confirmations and analytics are the opposite case. Nobody is waiting, nothing breaks if they are a
+minute late, and — the part that matters — **the producer must not have to know they exist**. Adding
+analytics-service required no change to order-service at all.
+
+**The test to apply:** if the caller needs the effect to have happened before it can proceed, it is a
+call. If the caller is merely announcing a fact, it is an event. Publishing an event and also waiting
+for its consumer is the worst of both.
+
+**Only successes are published.** A declined payment is information a fraud service would want and a
+receipt service must never act on, and a topic is read by consumers who cannot be enumerated. Facts that
+are safe for all of them, or a separate topic.
+
+---
+
+## D21 — Consumers deduplicate on a natural key, in the work, not in the listener
+
+**Decision.** Every consumer checks "have I already done this for order N?" before acting, keyed by
+order id, inside the class that does the work.
+
+**Why deduplicate at all.** Kafka delivers at least once, and that is the better of the two options: a
+consumer commits its offset after processing, so a crash in between redelivers, while committing first
+would trade duplicates for silent loss. A rebalance, a slow poll, a restarted pod and a producer retry
+all produce the same redelivery.
+
+**The broker cannot help.** Producer idempotence removes duplicates *one producer session* creates;
+transactions give exactly-once between topics. Neither covers a consumer adding a number to a total
+twice, because that side effect lives outside Kafka. At-least-once is a statement about your code.
+
+**Why a natural key.** Same argument as 5e's `order_id UNIQUE`: a caller cannot forget it and cannot
+regenerate it. A per-message UUID deduplicates only identical retransmissions — republish the same order
+from a restarted producer with a fresh UUID and it counts twice again.
+
+**Why in the work.** "Have I already confirmed this order?" would need answering identically if the
+event arrived over HTTP or was replayed from a file during a migration. A listener that deduplicated
+would leave the method unsafe for every other caller.
+
+**Why one guard per unit of work, not per entity.** `ReceiptSender` has its own store rather than
+sharing `ConfirmationSender`'s. A shared "have I seen order 17?" would mean confirming an order
+suppressed its receipt.
+
+**The limit, stated rather than hidden.** A guard must be **at least as durable as the effect it
+guards**. analytics-service's protects an in-memory tally, so both are lost together and cannot
+disagree. notification-service's protects an email that has already left — restart it mid-redelivery and
+the customer gets a second confirmation. Both are bounded at 10,000 ids, so an older redelivery would
+slip through. Correct for this platform's seconds-long redelivery window; a database table or a Redis
+key with a TTL is the answer where it is not.
+
+---
+
+## D22 — A dead letter topic per consumer group, and a monitor over all of them
+
+**Decision.** Failed records go to `<topic>.<consumer-group>.DLT` after a small retry budget — or
+immediately, if the failure is deterministic — and analytics-service counts what is sitting in every
+DLT on the platform.
+
+**Why a DLT.** Ordering is per partition and the container honours it, so a record that keeps throwing
+blocks every later record on its partition. One malformed message stops a third of a service's work,
+and the only symptom is a consumer that has gone quiet. Measured: a poison message and then a good one
+on the same partition were 572 ms apart, because the bad one was routed away instead of retried forever.
+
+**Why per group and not per topic.** Spring's default `<topic>.DLT` pours every consumer's failures into
+one place. Two services read `bookstore.order.placed`, so "how many notifications are stuck?" would
+require inspecting each record, and a replay tool would re-deliver one service's failures to another.
+The group name is what makes a failure attributable.
+
+**Why deterministic failures skip the retries.** Malformed JSON fails the same way on the fourth attempt
+as on the first; the retries are pure delay while the partition waits. Transient failures get three
+attempts over about seven seconds. The budget is deliberately small — the DLT is the last line of
+defence, and a long budget turns "one bad message" into "this partition is minutes behind".
+
+**Why the monitor is the important half.** The DLT removes the *symptom* along with the failure. Before
+it, a poison message made a consumer visibly stop; after it, the consumer looks healthy while orders
+quietly go unconfirmed. **A dead letter topic without a monitor is worse than no dead letter topic**,
+because it converts a loud failure into a silent one. The threshold is one, the healthy state is
+silence, and depth (end offset minus start offset) is the number that matters — nothing consumes these
+topics, a human does.
+
+**Not good enough for production:** a monitor inside a service can fail with it, and this one is a
+scheduled method rather than an alert with an owner. Step 11 replaces it with a real one.
+---
+
 ## D5 — Cross-service references are plain IDs, not foreign keys
 
 **Decision.** `order_item.book_id` and `orders.user_id` are plain `BIGINT` columns with no FK constraint.

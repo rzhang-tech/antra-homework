@@ -15,6 +15,8 @@ git checkout step-4-monolith
 | `book-service` | 8082 | `bookdb` on 5434 | ☑ 5a |
 | `order-service` | 8083 | `orderdb` on 5435 | ☑ 5b |
 | `payment-service` | 8084 | `paymentdb` on 5436 | ☑ 5e |
+| `notification-service` | 8085 | none | ☑ 7a |
+| `analytics-service` | 8086 | none | ☑ 7b |
 
 ## Run it
 
@@ -22,7 +24,7 @@ git checkout step-4-monolith
 docker compose up -d
 ```
 
-(from `02-bookstore-capstone/` — starts **four** PostgreSQL instances)
+(from `02-bookstore-capstone/` — starts **four** PostgreSQL instances and a Kafka broker)
 
 **The config server starts first, and the other four will not start without it.** That is deliberate —
 see Step 6a — and it needs the encryption key, or the dev signing key in the repo cannot be decrypted:
@@ -47,6 +49,16 @@ cd order-service && ../mvnw spring-boot:run
 cd payment-service && ../mvnw spring-boot:run
 ```
 
+The two event consumers, which have no API and nothing calls:
+
+```bash
+cd notification-service && ../mvnw spring-boot:run
+```
+
+```bash
+cd analytics-service && ../mvnw spring-boot:run
+```
+
 Then work through [test-platform.http](test-platform.http), which exercises the boundary itself: a token
 minted on 8081, accepted on 8082.
 
@@ -56,7 +68,7 @@ Everything at once:
 ./mvnw test
 ```
 
-99 tests across the five modules. Testcontainers supplies the databases, and no test talks to the
+103 tests across the seven modules. Testcontainers supplies the databases, and no test talks to the
 config server, so nothing needs to be running.
 
 Run `./mvnw clean` at least once after pulling Step 6: `target/classes` keeps a copy of every resource
@@ -756,7 +768,245 @@ problem each one solves matters more than picking a winner.
   `com.example.order.exception.ResourceNotFoundException` lives in a YAML file that no compiler checks;
   rename the class and the config server will keep serving the old name perfectly happily.
 
-## Next — Step 7
+---
 
-Placing an order still does everything synchronously, so the customer waits for every side effect and
-each new one couples another service to the order path. Kafka.
+# Step 7 — things that happen without anyone waiting
+
+Before this step, everything a placed order caused happened inside the customer's request. Adding "send
+a confirmation" would have meant another synchronous call on the critical path: another thing that can
+be slow, another thing that can fail, and another reason an order does not go through. Adding
+"count it for analytics" would have meant a second one.
+
+Two new services now react to orders, and order-service knows about neither.
+
+## What it bought, measured
+
+Placing an order:
+
+```
+HTTP 201 in 0.59s        published at 09:47:57.281
+                         consumed  at 09:47:57.340, other process, other thread
+```
+
+With notification-service **stopped**:
+
+```
+order 1 -> HTTP 201 in 0.073s
+order 2 -> HTTP 201 in 0.067s
+order 3 -> HTTP 201 in 0.060s
+
+then, on restart, with nobody asking:
+09:49:04  CONFIRMATION ... order 20   (placed 09:48:23)
+09:49:04  CONFIRMATION ... order 21
+09:49:04  CONFIRMATION ... order 22
+```
+
+A consumer being down is not an outage; it is a queue. That single property is what the whole step is
+for, and it is why `placedAt` travels **in the payload** rather than being read off the record's
+timestamp — a consumer forty seconds or four hours behind still has to say when the order was placed.
+
+## Two consumer groups, and the one-character bug that hides in them
+
+analytics-service reads the same topic as notification-service under a different group id. Starting it
+for the first time:
+
+```
+analytics-service starts   -> 4 TALLY lines, the whole history replayed
+notification-service       -> 0 new confirmations
+```
+
+Offsets belong to the **group**, not to the topic. From the broker itself:
+
+```
+$ kafka-consumer-groups.sh --describe --all-groups
+
+analytics-service     bookstore.order.placed  partition 0  offset 3/3  lag 0
+notification-service  bookstore.order.placed  partition 0  offset 3/3  lag 0
+```
+
+**Give the two services the same group name and nothing errors.** Kafka would split the partitions
+between them, so roughly a third of orders would be confirmed but not counted and another third counted
+but not confirmed. The symptom is "analytics seems to be missing some orders", and it is invisible with
+one instance of each against a single-partition topic. That is why the group name is written down in
+the config repo with a comment, rather than defaulted from the application name.
+
+## Keying, and what it is actually for
+
+Every event is keyed by order id. The key chooses the partition, and Kafka orders records **within a
+partition and nowhere else**:
+
+```
+order 19 -> partition 1     order 21 -> partition 0
+order 20 -> partition 1     order 22 -> partition 0
+                            order 23 -> partition 0
+```
+
+Without the key, records round-robin, and "order placed" and "order cancelled" for the same order can be
+processed by different threads in either order. That bug appears only under load, only sometimes, and
+never on a one-partition development topic.
+
+Partition count is close to permanent: raising it re-hashes keys onto different partitions, so a key's
+history splits across two of them and per-key ordering breaks for everything already written.
+
+## The cross-service serialization trap
+
+Spring's `JsonSerializer` writes the producer's fully-qualified class name into a `__TypeId__` header,
+and a `JsonDeserializer` downstream obeys it. So order-service would be instructing notification-service
+to instantiate `com.example.order.event.OrderPlaced` — a class that does not exist there and must not
+(D12). The fix everyone reaches for is a shared jar of event classes, which recreates exactly the
+coupling the split removed.
+
+Type headers are off at the producer instead, and the type is chosen by the `@KafkaListener` method's
+own signature via a message converter. **A producer publishes facts, not Java types.** That decision
+paid for itself in 7c: notification-service consumes a second topic with a different event type, and it
+took a new method and nothing else.
+
+Each service keeps its own copy of every contract, which means each copy is a copy of *some past
+version*. That is the actual situation rather than a flaw, and it dictates the rule: unknown fields are
+ignored, missing fields tolerated. There is a test for it — a producer adding a field must not take the
+notification pipeline down.
+
+## At-least-once is a statement about your code
+
+A consumer processes a record and then commits its offset. Die in between, and the next owner of that
+partition delivers it again. Committing first would trade duplicates for silent loss, which is why
+`enable-auto-commit: false` is set and why guards exist. A rebalance, a slow poll, a restarted pod and
+a producer retry all produce the same effect.
+
+**The broker cannot fix this for you.** Producer idempotence removes duplicates one producer session
+creates; Kafka transactions give exactly-once between topics. Neither covers "this consumer added a
+number to a total twice", because that side effect lives outside Kafka.
+
+Republishing the same `OrderPlaced` twice into the live topic:
+
+```
+analytics-service     Order 25 has already been counted; ignoring redelivery      (x2)
+                      revenue unchanged at 30.13
+notification-service  Order 25 has already been confirmed; ignoring redelivery    (x2)
+                      no second confirmation
+```
+
+Four decisions inside that:
+
+- **The key is the order id, not a message id.** Same reasoning as payment-service's `order_id UNIQUE`
+  in 5e: a natural key cannot be forgotten and cannot be regenerated. A per-message UUID deduplicates
+  only identical retransmissions — republish after a producer restart with a fresh UUID and it counts
+  twice again.
+- **The guard lives in the work, not in the listener.** "Have I already counted this order?" would need
+  answering just the same if the events arrived over HTTP or were replayed from a file.
+- **`ReceiptSender` has its own guard**, not one shared with `ConfirmationSender`. Sharing a "have I
+  seen order 17?" set would mean confirming an order suppressed its receipt. Idempotency keys identify a
+  unit of work, not an entity.
+- **One call that both asks and records.** `hasSeen` then `markSeen` is a check-then-act race, and these
+  services consume three partitions concurrently.
+
+### The asymmetry worth noticing
+
+analytics-service's guard protects an in-memory tally, so guard and state are lost together and cannot
+disagree. notification-service's protects an email that has genuinely left the building — restart it
+while a redelivery is outstanding and the customer gets a second confirmation, because the guard forgot
+and the inbox did not.
+
+**An idempotency guard must be at least as durable as the effect it guards.** Both stores here are also
+bounded, so a redelivery older than the last 10,000 ids would slip through. Acceptable when redelivery
+happens within seconds; not acceptable in a system where it might not, where the guard belongs in a
+table with a retention policy or in Redis with a TTL longer than the worst redelivery window.
+
+## Which side effects became events, and which did not
+
+payment-service publishes `PaymentCompleted` **and still calls order-service synchronously** to mark the
+order paid. 5e's recovery job still never gives up.
+
+That is not an oversight. **An event tells people something happened; a call makes something happen.**
+order-service needs the money to have arrived before it hands over books, and "eventually, once a
+consumer catches up" is not a guarantee to put between a customer and their order. The event is for
+everyone else — receipts today, fraud scoring and revenue reporting later — none of whom payment-service
+should have to know about.
+
+Only successful payments are published. A declined payment is information a fraud service would want and
+a receipt service must never act on, and a topic is read by consumers you cannot enumerate. A separate
+`payment.declined` topic is the shape that scales, if anyone ever needs one.
+
+## The poison message, and why a dead letter topic is not optional
+
+Ordering is per partition, and the container honours it: a record that keeps throwing is retried and
+**every later record on that partition waits behind it**. One malformed message stops a third of a
+service's work indefinitely, and the only symptom is a consumer that has gone quiet.
+
+A poison message published to the live topic, followed immediately by a good one **on the same
+partition**:
+
+```
+13:25:13.188  WARN  Attempt 1 failed for bookstore.order.placed-0 offset 6: Listener failed
+13:25:13.760  INFO  CONFIRMATION to user 1: order 1000 accepted, total 11.00
+```
+
+**572 milliseconds**, and the partition kept moving. The bad record went to the dead letter topic on the
+first attempt rather than after three, because a conversion failure is deterministic — the same bytes
+fail the same way forever, and retrying is pure delay. Transient failures (a downstream timeout, a
+database blip) do get the retry budget: three attempts over about seven seconds.
+
+The retry budget is deliberately small. The DLT is the last line of defence, not the retries, and a long
+budget converts "one bad message" into "this partition is minutes behind" — the same outage arriving
+more slowly.
+
+### The DLT is named per consumer group
+
+Spring's default is `<topic>.DLT`. Two services read `bookstore.order.placed` here, so the default would
+pour both services' failures into one topic — and then "how many notifications are stuck?" cannot be
+answered without inspecting every record, and a replay tool would have to re-deliver analytics failures
+to notification-service to find its own.
+
+```
+bookstore.order.placed.notification-service.DLT
+bookstore.order.placed.analytics-service.DLT
+bookstore.payment.completed.notification-service.DLT
+```
+
+### A dead letter topic without a monitor is worse than none
+
+The DLT's purpose is to get a failing message out of the way so the partition keeps moving. That is also
+its danger: **the symptom of failure is removed along with the failure.** Before the DLT, a poison
+message made a consumer visibly stop. After it, the consumer looks perfectly healthy while orders quietly
+go unconfirmed, and nobody finds out until a customer asks.
+
+`DeadLetterMonitor` counts records in every DLT on the platform — including notification-service's,
+because a monitor that only watched its own would leave the other service's failures unobserved:
+
+```
+13:25:14  WARN  DEAD LETTER: bookstore.order.placed.notification-service.DLT holds 1 message(s)
+                nothing has dealt with. Read them, fix the cause, then replay or discard deliberately.
+
+$ curl localhost:8086/actuator/metrics/bookstore.dlq.depth
+{"name":"bookstore.dlq.depth","measurements":[{"statistic":"VALUE","value":1.0}]}
+```
+
+Depth (end offset minus start offset), not consumer lag: nothing consumes these topics, a human does,
+and the alert-worthy threshold is **one**. It says nothing at all when every DLT is empty — a monitor
+that logs "0 messages" every thirty seconds trains everyone to skip its output.
+
+In a real deployment this is a Prometheus alert with an owner, not a scheduled method inside a service —
+a monitor living inside the service that is failing can fail with it. The value here is knowing what to
+alert on.
+
+## What got worse
+
+- **A dual-write hole, and it is not fixed.** The order is committed and the send can still fail,
+  leaving an order nobody was told about — no error, no retry, no trace. A database write and a Kafka
+  send cannot be one atomic act. The answer is a transactional outbox: write the event into the order's
+  own database in the same transaction as the order, and let a poller publish it. Stated plainly in
+  `OrderEventPublisher` rather than papered over, and the largest thing this step leaves undone.
+- **"What happens when an order is placed?" is no longer answerable by reading order-service.** The
+  synchronous version was traceable in a debugger. This one requires knowing which topics exist and who
+  subscribes to them, and the answer changes when somebody deploys a new consumer.
+- **Two more processes**, neither of which anything monitors except by reading logs, and both of which
+  keep their state in memory.
+- **The event contracts have no schema registry.** Each service holds a hand-written copy, and nothing
+  fails at build time when a producer renames a field — only a consumer, at runtime, quietly binding
+  null. Avro or JSON Schema with a registry is the industrial answer; the test that pins the wire format
+  is this project's smaller one.
+
+## Next — Step 8
+
+Five services with public APIs means five addresses, five places a token is validated, and five copies
+of "what is public". Spring Cloud Gateway.

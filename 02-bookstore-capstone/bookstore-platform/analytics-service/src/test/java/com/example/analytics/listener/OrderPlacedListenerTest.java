@@ -1,20 +1,18 @@
 package com.example.analytics.listener;
 
 import com.example.analytics.service.SalesTally;
+import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Import;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
-import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.kafka.core.ProducerFactory;
+import org.springframework.kafka.test.EmbeddedKafkaBroker;
 import org.springframework.kafka.test.context.EmbeddedKafka;
+import org.springframework.kafka.test.utils.KafkaTestUtils;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.math.BigDecimal;
@@ -37,12 +35,11 @@ import static org.awaitility.Awaitility.await;
 @SpringBootTest
 @EmbeddedKafka(partitions = 3, topics = "bookstore.order.placed")
 @ActiveProfiles("test")
-@Import(OrderPlacedListenerTest.RawJsonProducer.class)
 @DisplayName("OrderPlaced, counted")
 class OrderPlacedListenerTest {
 
     @Autowired
-    private KafkaTemplate<String, String> rawJson;
+    private EmbeddedKafkaBroker broker;
 
     @Autowired
     private SalesTally tally;
@@ -59,7 +56,7 @@ class OrderPlacedListenerTest {
         // happened to run first, which is the classic shared-fixture trap and worth not shipping.
         BigDecimal revenueBefore = tally.currentRevenue();
 
-        rawJson.send("bookstore.order.placed", "500", """
+        publishRaw("bookstore.order.placed", "500", """
                 {
                   "orderId": 500,
                   "userId": 3,
@@ -103,8 +100,8 @@ class OrderPlacedListenerTest {
 
         BigDecimal revenueBefore = tally.currentRevenue();
 
-        rawJson.send("bookstore.order.placed", "501", sameOrderTwice);
-        rawJson.send("bookstore.order.placed", "501", sameOrderTwice);
+        publishRaw("bookstore.order.placed", "501", sameOrderTwice);
+        publishRaw("bookstore.order.placed", "501", sameOrderTwice);
 
         await().atMost(Duration.ofSeconds(20))
                 .untilAsserted(() -> assertThat(tally.copiesSoldOf(12L)).isEqualTo(1));
@@ -119,22 +116,24 @@ class OrderPlacedListenerTest {
                 });
     }
 
-    /** See notification-service's copy: the application's own template would serialise this to a
-     *  quoted JSON string literal. The point is to publish the bytes order-service publishes. */
-    @TestConfiguration
-    static class RawJsonProducer {
+    /**
+     * Publishes the exact bytes another service publishes.
+     *
+     * <p>Built here rather than registered as a bean, and that is not a style choice. A
+     * {@code KafkaTemplate} bean of any generic type suppresses Spring Boot's auto-configured one
+     * ({@code @ConditionalOnMissingBean(KafkaTemplate.class)} matches by raw type), which quietly
+     * removed the template the dead letter recoverer needs — a test fixture breaking production
+     * wiring, discovered only when Step 7d added the recoverer.
+     */
+    private void publishRaw(String topic, String key, String json) {
+        Map<String, Object> props = new HashMap<>(KafkaTestUtils.producerProps(broker));
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
 
-        @Bean
-        public KafkaTemplate<String, String> rawJsonTemplate(
-                @Value("${spring.kafka.bootstrap-servers}") String bootstrapServers) {
-
-            Map<String, Object> config = new HashMap<>();
-            config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-            config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
-            config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
-
-            ProducerFactory<String, String> factory = new DefaultKafkaProducerFactory<>(config);
-            return new KafkaTemplate<>(factory);
+        try (Producer<String, String> producer =
+                     new DefaultKafkaProducerFactory<String, String>(props).createProducer()) {
+            producer.send(new ProducerRecord<>(topic, key, json));
+            producer.flush();
         }
     }
 }
