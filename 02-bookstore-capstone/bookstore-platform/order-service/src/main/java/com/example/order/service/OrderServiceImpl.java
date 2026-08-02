@@ -33,43 +33,39 @@ public class OrderServiceImpl implements OrderService {
 
     private final OrderRepository orderRepository;
     private final CatalogGateway catalog;
+    private final OrderTransactions orderTransactions;
 
     /**
-     * Places an order.
+     * Places an order, as a saga.
      *
-     * <p><strong>This method is the whole point of Step 5.</strong> In the monolith it was one
-     * transaction: read the book, check stock, decrement it, insert the order, commit. Either all of it
-     * happened or none of it did, and the database guaranteed that.
+     * <p><strong>Deliberately not {@code @Transactional}.</strong> A transaction here would be the exact
+     * illusion this step exists to dispel — it cannot roll back anything book-service committed, and it
+     * would hold a database connection open across two network calls. Each step below commits on its
+     * own, through {@link OrderTransactions}.
      *
-     * <p>Now the reads and the stock decrement are HTTP calls to another service with its own database.
-     * There is no transaction spanning both. {@code @Transactional} here covers exactly one thing — the
-     * rows in <em>this</em> service's database — and has no authority over anything book-service did.
-     *
-     * <p>The sequence below is deliberate:
+     * <p>The order of the steps is the design:
      *
      * <ol>
-     *   <li><strong>Read every book first, and validate.</strong> Cheap, side-effect free, and it
-     *       rejects bad orders before anything has been changed anywhere.</li>
-     *   <li><strong>Then decrement stock, item by item.</strong> The first call with consequences. If
-     *       one fails after earlier ones succeeded, the earlier decrements have already been committed
-     *       in book-service and must be compensated — see below.</li>
-     *   <li><strong>Then write the order locally.</strong> Last, because it is the only step this
-     *       service can roll back.</li>
+     *   <li><strong>Read and validate.</strong> Free, reversible, and it rejects bad orders before
+     *       anything anywhere has changed.</li>
+     *   <li><strong>Write the order as PENDING, and commit.</strong> Nothing irreversible has happened
+     *       yet, and from here on there is a durable record of what was meant to happen. This is the
+     *       step 5b did not have, and its absence was the hole: a crash after reserving stock left the
+     *       stock gone with nothing to find it by.</li>
+     *   <li><strong>Reserve stock,</strong> each line under the reservation id already persisted with
+     *       it. Now safe to retry, because book-service recognises a repeated id.</li>
+     *   <li><strong>Mark AWAITING_PAYMENT, and commit.</strong> The saga is complete.</li>
      * </ol>
      *
-     * <p><strong>What is still wrong with this, honestly.</strong> The compensation is best-effort: if
-     * the process dies between decrementing stock and writing the order, stock is gone and no order
-     * exists, and nothing will ever notice. A real saga persists its intent before acting, so a
-     * recovery process can finish or unwind it after a crash. That is 5d. Stating the gap is not an
-     * excuse for it — but a compensating call that usually works is meaningfully better than pretending
-     * a distributed transaction exists.
+     * <p>If step 3 fails, the reservations already made are released and the order becomes FAILED. If
+     * the process dies anywhere in 3 or 4, the order stays PENDING and {@link OrderRecoveryJob} finishes
+     * the unwinding later. Nothing is lost silently, which is the property 5b could not offer.
      */
     @Override
-    @Transactional
     public OrderResponseDto place(AuthenticatedUser customer, OrderRequestDto request) {
         Map<Long, Integer> quantities = collapseDuplicateLines(request.items());
 
-        // --- 1. Read. No side effects yet, so failing here costs nothing. -----------------------
+        // --- 1. Read and validate. -------------------------------------------------------------
         Map<Long, BookSnapshot> books = new LinkedHashMap<>();
         for (Long bookId : quantities.keySet()) {
             BookSnapshot book = catalog.findById(bookId);
@@ -78,74 +74,60 @@ public class OrderServiceImpl implements OrderService {
             }
             books.put(bookId, book);
         }
-
-        // Check stock before touching anything. book-service checks again when decrementing — this is
-        // an optimisation and a better error message, never the actual guarantee. Between this read
-        // and that write another customer can take the last copy, and only book-service's own
-        // transaction can settle it.
         for (var entry : quantities.entrySet()) {
             BookSnapshot book = books.get(entry.getKey());
             if (book.stock() < entry.getValue()) {
+                // book-service checks again when reserving. This is a better error message and a
+                // cheaper rejection, never the actual guarantee — between this read and that write
+                // another customer can take the last copy.
                 throw new OrderNotAllowedException(
                         "Book " + book.id() + " ('" + book.title() + "'): requested "
                                 + entry.getValue() + " but only " + book.stock() + " in stock");
             }
         }
 
-        // --- 2. Reserve stock. From here, failure needs compensating. ---------------------------
-        List<Long> decremented = new ArrayList<>();
+        // --- 2. Write the intent down and COMMIT it. --------------------------------------------
+        Order order = orderTransactions.createPending(customer, quantities, books);
+        log.info("Order {} created as PENDING with {} reservations to place",
+                order.getId(), order.getItems().size());
+
+        // --- 3. Reserve stock, under ids already on disk. ---------------------------------------
+        List<OrderItem> reserved = new ArrayList<>();
         try {
-            for (var entry : quantities.entrySet()) {
-                catalog.purchase(entry.getKey(), entry.getValue());
-                decremented.add(entry.getKey());
+            for (OrderItem item : order.getItems()) {
+                catalog.purchase(item.getBookId(), item.getQuantity(), item.getReservationId());
+                reserved.add(item);
             }
         } catch (RuntimeException ex) {
-            compensate(decremented, quantities);
+            log.warn("Order {} failed while reserving stock ({}); compensating {} reservation(s)",
+                    order.getId(), ex.toString(), reserved.size());
+            releaseAll(reserved);
+            orderTransactions.markFailed(order.getId());
             throw ex;
         }
 
-        // --- 3. Write the order. The only step with a real rollback. ----------------------------
-        Order order = Order.builder()
-                .userId(customer.id())
-                .status(OrderStatus.PENDING)
-                .totalPrice(BigDecimal.ZERO)
-                .build();
-
-        BigDecimal total = BigDecimal.ZERO;
-        for (var entry : quantities.entrySet()) {
-            BookSnapshot book = books.get(entry.getKey());
-            OrderItem item = OrderItem.builder()
-                    .bookId(book.id())
-                    .bookTitle(book.title())
-                    .quantity(entry.getValue())
-                    // Captured, not referenced: a later price change must not alter this receipt.
-                    .unitPrice(book.price())
-                    .build();
-            order.addItem(item);
-            total = total.add(book.price().multiply(BigDecimal.valueOf(entry.getValue())));
-        }
-        order.setTotalPrice(total);
-
-        return OrderResponseDto.from(orderRepository.save(order));
+        // --- 4. The saga is complete. -----------------------------------------------------------
+        return OrderResponseDto.from(orderTransactions.markAwaitingPayment(order.getId()));
     }
 
     /**
-     * Best-effort undo of stock already taken.
+     * Gives back stock, one reservation at a time, refusing to stop at the first problem.
      *
-     * <p>A negative purchase is not an API book-service offers, so this logs loudly rather than
-     * pretending to fix it. Naming the gap in the logs is worth more than a silent {@code catch}: the
-     * operator can reconcile, and the noise is a standing argument for the durable saga in 5d.
+     * <p>The loop swallows per-item failures on purpose. A compensating action that aborts halfway
+     * leaves <em>more</em> inconsistency than it started with, and the caller is already handling a
+     * failure — throwing a second one from the cleanup buries the first. What cannot be released is
+     * logged at ERROR with everything an operator needs, and the recovery job will try again.
      */
-    private void compensate(List<Long> decremented, Map<Long, Integer> quantities) {
-        if (decremented.isEmpty()) {
-            return;
+    private void releaseAll(List<OrderItem> items) {
+        for (OrderItem item : items) {
+            try {
+                catalog.release(item.getReservationId());
+            } catch (RuntimeException ex) {
+                log.error("COMPENSATION FAILED: reservation {} for {} copies of book {} could not be "
+                                + "released ({}). Stock is held with no order behind it.",
+                        item.getReservationId(), item.getQuantity(), item.getBookId(), ex.toString());
+            }
         }
-        log.error("Order failed after reserving stock for books {}. book-service has already committed "
-                        + "those decrements and there is no transaction to roll them back. "
-                        + "Quantities to reconcile: {}",
-                decremented,
-                decremented.stream().collect(
-                        LinkedHashMap::new, (m, id) -> m.put(id, quantities.get(id)), Map::putAll));
     }
 
     /** Two lines for the same book are one reservation, not two — and one clearer error if it fails. */
@@ -186,8 +168,15 @@ public class OrderServiceImpl implements OrderService {
         return OrderResponseDto.from(order);
     }
 
+    /**
+     * Cancels an order and returns its stock.
+     *
+     * <p>Not transactional, and in the same shape as {@code place}: release first, then record the
+     * cancellation. If the process dies between the two, the order is still cancellable and release is
+     * idempotent, so a repeat is harmless. Recording the cancellation first would risk an order that
+     * looks resolved while its stock is still held — the failure that leaves no trace.
+     */
     @Override
-    @Transactional
     public OrderResponseDto cancel(AuthenticatedUser caller, Long id) {
         Order order = orderRepository.findWithItemsById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Order not found with id " + id));
@@ -196,18 +185,12 @@ public class OrderServiceImpl implements OrderService {
         if (order.getStatus() == OrderStatus.SHIPPED) {
             throw new OrderNotAllowedException("Order " + id + " has already shipped");
         }
-        if (order.getStatus() == OrderStatus.CANCELLED) {
+        if (order.getStatus() == OrderStatus.CANCELLED || order.getStatus() == OrderStatus.FAILED) {
             return OrderResponseDto.from(order);   // idempotent: cancelling twice is not an error
         }
 
-        order.setStatus(OrderStatus.CANCELLED);
-
-        // Returning the stock is a cross-service write with the same lack of a shared transaction as
-        // placing the order, and is deliberately left to 5d rather than bolted on here.
-        log.warn("Order {} cancelled. Stock for its items is NOT yet returned to book-service — "
-                + "restocking is part of the 5d saga work.", id);
-
-        return OrderResponseDto.from(order);
+        releaseAll(order.getItems());
+        return OrderResponseDto.from(orderTransactions.markCancelled(id));
     }
 
     private void requireVisibleTo(AuthenticatedUser caller, Order order) {

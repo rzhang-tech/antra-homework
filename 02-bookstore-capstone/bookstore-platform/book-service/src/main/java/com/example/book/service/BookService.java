@@ -29,7 +29,15 @@ public interface BookService {
      * value. Between the read and the write another transaction can do exactly the same thing — which
      * is what {@code @Version} on {@link com.example.book.entity.Book} exists to catch.
      */
-    BookResponseDto purchase(Long id, int quantity);
+    BookResponseDto purchase(Long id, int quantity, java.util.UUID reservationId);
+
+    /**
+     * Returns previously reserved stock to the shelf.
+     *
+     * <p>The compensating half of {@link #purchase}. A distributed workflow that cannot undo its own
+     * steps is not a workflow, it is a way of losing inventory.
+     */
+    BookResponseDto release(java.util.UUID reservationId);
 
     void delete(Long id);
 }

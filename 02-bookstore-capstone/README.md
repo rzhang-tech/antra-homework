@@ -17,7 +17,7 @@ technology enters.
 | 2 | PostgreSQL, indexes, transactions, N+1, optimistic locking | ☑ done |
 | 3 | Spring Security, JWT, USER/ADMIN roles | ☑ done |
 | 4 | Testing — 50 tests: unit, repository, web, integration | ☑ done |
-| 5 | Split into microservices | ◐ 5a-5c done — three services, OpenFeign, circuit breaker |
+| 5 | Split into microservices | ◐ 5a-5d done — three services, Feign, circuit breaker, saga; payment-service outstanding |
 | 6–11 | Config · Kafka · Gateway · AWS · K8s · CI/CD | planned |
 
 ## Layout

@@ -19,7 +19,10 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
+import java.util.UUID;
+
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+import static com.github.tomakehurst.wiremock.client.WireMock.containing;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.okJson;
@@ -110,18 +113,54 @@ class CatalogGatewayResilienceTest {
     }
 
     @Test
-    @DisplayName("a stock reservation is NEVER retried — a repeat would sell the book twice")
-    void writeIsNotRetried() {
+    @DisplayName("a stock reservation IS retried now — the reservation id makes a repeat safe")
+    void writeIsRetriedBecauseItIsIdempotent() {
         catalogStub.stubFor(post(urlPathEqualTo("/api/books/1/purchase"))
                 .willReturn(aResponse().withStatus(500)));
 
-        assertThatThrownBy(() -> gateway.purchase(1L, 1))
+        assertThatThrownBy(() -> gateway.purchase(1L, 1, UUID.randomUUID()))
                 .isInstanceOf(CatalogUnavailableException.class);
 
-        // Exactly one. The dangerous case is book-service committing the decrement and the response
-        // being lost on the way back — indistinguishable from "nothing happened", and retried it takes
-        // a second copy off the shelf.
-        catalogStub.verify(1, postRequestedFor(urlPathEqualTo("/api/books/1/purchase")));
+        /*
+         * This assertion was `1` until 5d, with a comment explaining at length why retrying a stock
+         * decrement would sell the book twice. All of that was true of the endpoint as it stood.
+         *
+         * It is not true of this one. Every attempt carries the same reservation id, book-service
+         * records that id in the same transaction as the decrement, and a repeat is recognised rather
+         * than reapplied. The dilemma was never "retries are dangerous" — it was that the operation
+         * could not tell two attempts apart. Idempotency removed the dilemma instead of picking a side.
+         */
+        catalogStub.verify(3, postRequestedFor(urlPathEqualTo("/api/books/1/purchase")));
+    }
+
+    @Test
+    @DisplayName("every retry of a reservation carries the SAME id — otherwise it is not idempotent")
+    void retriesReuseTheSameReservationId() {
+        UUID reservationId = UUID.randomUUID();
+        catalogStub.stubFor(post(urlPathEqualTo("/api/books/1/purchase"))
+                .willReturn(aResponse().withStatus(500)));
+
+        assertThatThrownBy(() -> gateway.purchase(1L, 1, reservationId))
+                .isInstanceOf(CatalogUnavailableException.class);
+
+        // A fresh id per attempt would make three separate reservations — the exact bug the mechanism
+        // exists to prevent, and one that would pass a test only counting requests.
+        catalogStub.verify(3, postRequestedFor(urlPathEqualTo("/api/books/1/purchase"))
+                .withRequestBody(containing(reservationId.toString())));
+    }
+
+    @Test
+    @DisplayName("releasing a reservation is retried — a compensation that gives up leaves stock held")
+    void releaseIsRetried() {
+        UUID reservationId = UUID.randomUUID();
+        catalogStub.stubFor(post(urlPathEqualTo("/api/books/reservations/" + reservationId + "/release"))
+                .willReturn(aResponse().withStatus(500)));
+
+        assertThatThrownBy(() -> gateway.release(reservationId))
+                .isInstanceOf(CatalogUnavailableException.class);
+
+        catalogStub.verify(3, postRequestedFor(
+                urlPathEqualTo("/api/books/reservations/" + reservationId + "/release")));
     }
 
     @Test
@@ -176,7 +215,7 @@ class CatalogGatewayResilienceTest {
                 .willReturn(aResponse().withStatus(409)));
 
         for (int i = 0; i < 10; i++) {
-            assertThatThrownBy(() -> gateway.purchase(1L, 1))
+            assertThatThrownBy(() -> gateway.purchase(1L, 1, UUID.randomUUID()))
                     .isInstanceOf(OrderNotAllowedException.class);
         }
 

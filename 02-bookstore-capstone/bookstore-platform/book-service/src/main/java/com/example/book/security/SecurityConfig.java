@@ -57,6 +57,11 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.POST, "/api/books/*/purchase")
                             .hasAnyRole("USER", "ADMIN")
 
+                        // Compensation is reachable by whoever could reserve. A failed order that only
+                        // a human could unwind is not a compensating action, it is a support ticket.
+                        .requestMatchers(HttpMethod.POST, "/api/books/reservations/*/release")
+                            .hasAnyRole("USER", "ADMIN")
+
                         .requestMatchers(HttpMethod.POST, "/api/books").hasRole("ADMIN")
                         .requestMatchers(HttpMethod.PUT, "/api/books/*").hasRole("ADMIN")
                         .requestMatchers(HttpMethod.DELETE, "/api/books/*").hasRole("ADMIN")

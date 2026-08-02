@@ -1,11 +1,14 @@
 package com.example.order.repository;
 
 import com.example.order.entity.Order;
+import com.example.order.entity.OrderStatus;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
 
+import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 public interface OrderRepository extends JpaRepository<Order, Long> {
@@ -24,4 +27,13 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     @EntityGraph(attributePaths = "items")
     @Override
     Page<Order> findAll(Pageable pageable);
+
+    /**
+     * Orders whose saga appears to have been abandoned.
+     *
+     * <p>Fetches the items eagerly because the recovery job reads each line's reservation id outside a
+     * transaction — a lazy collection there would throw rather than load.
+     */
+    @EntityGraph(attributePaths = "items")
+    List<Order> findByStatusAndStateChangedAtBefore(OrderStatus status, Instant before);
 }

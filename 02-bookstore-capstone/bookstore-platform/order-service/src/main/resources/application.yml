@@ -15,6 +15,12 @@ app:
   jwt:
     expiration-minutes: 60
     issuer: bookstore
+  saga:
+    # How long an order may sit in PENDING before recovery presumes its orchestrator died. Comfortably
+    # longer than the worst honest case (every Feign timeout plus retries, several times over): unwinding
+    # an order that was merely slow is a self-inflicted outage, and being slow to reclaim stock is not.
+    pending-timeout: PT2M
+    recovery-interval-ms: 30000
 
 resilience4j:
   # Aspect order, which the default gets backwards for this use case.

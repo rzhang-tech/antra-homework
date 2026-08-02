@@ -78,6 +78,23 @@ public class Order {
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
+    /**
+     * When the saga last moved.
+     *
+     * <p>Distinct from {@code createdAt} because the recovery job asks a different question: not "how
+     * old is this order" but "how long has it been stuck in this state". An order created an hour ago
+     * and paid for is fine; one that has been PENDING for an hour is not.
+     */
+    @Column(name = "state_changed_at", nullable = false)
+    @Builder.Default
+    private Instant stateChangedAt = Instant.now();
+
+    /** Moves the saga on, recording when — the two must never drift apart. */
+    public void transitionTo(OrderStatus next) {
+        this.status = next;
+        this.stateChangedAt = Instant.now();
+    }
+
     /** Keeps both sides of the relation consistent — setting only one is the classic JPA bug. */
     public void addItem(OrderItem item) {
         items.add(item);

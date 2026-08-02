@@ -249,7 +249,7 @@ class BookControllerTest {
         @WithMockUser(roles = "USER")
         @DisplayName("insufficient stock -> 409, with the numbers in the message")
         void insufficientStockIs409() throws Exception {
-            when(bookService.purchase(eq(1L), eq(99)))
+            when(bookService.purchase(eq(1L), eq(99), any()))
                     .thenThrow(new InsufficientStockException(1L, 99, 3));
 
             mockMvc.perform(post("/api/books/1/purchase").with(csrf())

@@ -24,6 +24,7 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.net.URI;
+import java.util.UUID;
 
 /**
  * HTTP entry point for the catalog.
@@ -73,7 +74,19 @@ public class BookController {
     @PostMapping("/{id}/purchase")
     public BookResponseDto purchase(@PathVariable Long id,
                                     @Valid @RequestBody PurchaseRequestDto request) {
-        return bookService.purchase(id, request.quantity());
+        return bookService.purchase(id, request.quantity(), request.reservationId());
+    }
+
+    /**
+     * Returns reserved stock to the shelf.
+     *
+     * <p>Requires the same roles as purchasing rather than ADMIN: the caller undoing a reservation is
+     * the service that made it, acting for the customer whose order failed. Restricting it to staff
+     * would mean a failed order could only be compensated by a human.
+     */
+    @PostMapping("/reservations/{reservationId}/release")
+    public BookResponseDto release(@PathVariable UUID reservationId) {
+        return bookService.release(reservationId);
     }
 
     @DeleteMapping("/{id}")

@@ -44,7 +44,7 @@ Everything at once:
 ./mvnw test
 ```
 
-79 tests across the three services. Testcontainers supplies the databases, so nothing needs to be running.
+82 tests across the three services. Testcontainers supplies the databases, so nothing needs to be running.
 
 ---
 
@@ -308,8 +308,112 @@ A breaker whose state nobody can see converts an outage into a mystery — "it s
 its own" is not an incident report. In a real deployment these are reachable only from inside the
 cluster; the gateway never routes `/actuator/**` from outside.
 
-## Next — 5d
+---
 
-`payment-service`, and the problem 5b and 5c have been deferring: an order that reserves stock in another
-service's database has no transaction to roll back. Idempotency keys, compensating actions, and a saga
-that survives the process dying halfway through.
+# Step 5d — idempotency and a saga that survives a crash
+
+Two problems have been outstanding since 5b, and they turn out to be one problem.
+
+**5b's hole.** `place` reserved stock in book-service and *then* wrote the order. If the process died in
+between, the stock was gone, no order existed, and nothing anywhere knew. No log, no row, no way to
+notice.
+
+**5c's dilemma.** The stock write could not be retried, because a lost response is indistinguishable
+from a failure and a repeat would sell the book twice. 5c chose to under-sell and documented the choice
+as a symptom.
+
+Both come from the same root: **the operation could not tell two attempts apart.**
+
+## Idempotent stock reservation
+
+The caller chooses a `reservationId` *before* calling. book-service records it **in the same transaction
+as the decrement**, and on seeing it again reports the current state without acting.
+
+Measured against the running services:
+
+```
+same reservationId, three calls          without a reservationId, three calls
+  call 1 -> stock 90                       call 1 -> stock 80
+  call 2 -> stock 90                       call 2 -> stock 70
+  call 3 -> stock 90                       call 3 -> stock 60
+```
+
+The left column is the fix, the right column is the bug it prevents. Releasing is idempotent too —
+a second release does not credit the stock twice:
+
+```
+release -> stock 70
+release -> stock 70
+```
+
+Writing the reservation in the same transaction as the decrement is not tidiness. Two transactions could
+commit the decrement and lose the record, and the next retry would decrement again — exactly the bug
+this exists to prevent. Two concurrent requests with the same id are settled by the primary key: one
+loses, and its whole transaction including the decrement rolls back.
+
+**With that in place, 5c's dilemma disappears.** `purchase` is retried again, and there is a test
+asserting that every attempt carries the *same* id — a fresh id per attempt would make three
+reservations and pass any test that only counted requests.
+
+## The order is written before anything irreversible happens
+
+```
+1. read and validate         free, reversible, rejects bad orders before anything changes
+2. write PENDING, COMMIT     ← the step 5b did not have
+3. reserve stock             under ids already on disk; now safe to retry
+4. mark AWAITING_PAYMENT     the saga is complete
+```
+
+`place` is deliberately **not** `@Transactional`. A transaction spanning it would be exactly the
+illusion this step dispels — it cannot roll back anything book-service committed, and it would hold a
+database connection open across two network calls.
+
+Each step commits separately, through `OrderTransactions`. That is its own bean rather than a private
+method for a reason first met in Step 1: **Spring AOP is proxy-based, so a self-invocation bypasses
+`@Transactional` entirely**. Steps that silently did not commit would defeat the entire design, and
+nothing would look wrong.
+
+## The recovery job
+
+Everything above handles failures the process is *present* for. None of it survives being killed between
+two steps — which is exactly when inconsistency is created and nobody is left to notice.
+
+An order stuck in `PENDING` is that footprint: healthy orders are PENDING for milliseconds. The job
+finds them, releases the reservation ids committed with them in step 2, and marks them FAILED.
+
+It ran for real on this platform, on eight orders left stranded by the 5b and 5c experiments:
+
+```
+Saga recovery: 8 order(s) stuck in PENDING since before 2026-08-02T04:41:05Z. Unwinding.
+Saga recovery: order 1 unwound and marked FAILED
+...
+```
+
+Two ordering decisions inside it:
+
+- **Release before marking FAILED.** If the job dies midway the order is still PENDING and the next run
+  retries; release is idempotent, so that is harmless. The other order risks an order that looks
+  resolved while its stock is still held — the failure that leaves no trace.
+- **Unwind rather than roll forward.** Completing a stranded order would require knowing whether each
+  reservation took effect. Unwinding requires no such knowledge: releasing a reservation that was never
+  made is a no-op. In recovery code, prefer the direction that needs less information.
+
+## What is deliberately still missing
+
+`payment-service` is not built. Step 5's service list is therefore incomplete, and this is called out
+rather than glossed: the remaining work is a fourth service that pays for an `AWAITING_PAYMENT` order
+and moves it to `PAID` — the same patterns as above with an idempotency key on `order_id`, which the
+schema in the brief already anticipates with its `UNIQUE` constraint.
+
+Also honestly outstanding:
+
+- **Compensation is at-least-once, not exactly-once in the face of everything.** If book-service is down
+  for longer than the recovery job's patience, stock stays held until it comes back. The job keeps
+  retrying, which is the right behaviour, but "eventually" is doing real work in that sentence.
+- **The recovery job runs on every instance.** With more than one replica they would race — harmless
+  here because releasing twice is a no-op, but a shared lock or a single scheduled leader is the real
+  answer, and Step 10 is where that becomes unavoidable.
+
+## Next
+
+`payment-service`, then Step 6's config server.

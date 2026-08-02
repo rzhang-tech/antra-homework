@@ -16,6 +16,7 @@ import lombok.NoArgsConstructor;
 import lombok.Setter;
 
 import java.math.BigDecimal;
+import java.util.UUID;
 
 @Entity
 @Table(name = "order_item")
@@ -59,4 +60,14 @@ public class OrderItem {
      */
     @Column(name = "unit_price", nullable = false, precision = 10, scale = 2)
     private BigDecimal unitPrice;
+
+    /**
+     * The id this line's stock was reserved under in book-service.
+     *
+     * <p>Generated here, before the call, which is what makes the call repeatable — and recorded here,
+     * which is what makes compensation possible. Without it, unwinding a failed order would mean
+     * guessing what to give back.
+     */
+    @Column(name = "reservation_id")
+    private UUID reservationId;
 }

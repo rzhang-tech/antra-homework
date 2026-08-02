@@ -10,7 +10,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.util.Map;
+import java.util.UUID;
 
 /**
  * The only thing in this service that talks to the catalog.
@@ -77,14 +77,35 @@ public class CatalogGateway {
     }
 
     /**
-     * Reserves stock. Circuit-broken, deliberately <strong>not</strong> retried.
+     * Reserves stock under a caller-chosen id — and, as of 5d, <strong>is</strong> retried.
      *
-     * <p>The circuit breaker still applies: if the catalog is known to be down there is no point
-     * attempting a write either, and failing instantly is strictly better than failing slowly.
+     * <p>5c argued at length that this write must never be retried, because a lost response is
+     * indistinguishable from a failure and a repeat would sell the book twice. That was true of the
+     * endpoint as it stood. It is no longer true of this one: book-service records the reservation id
+     * in the same transaction as the decrement, so a repeat carrying the same id is recognised and
+     * takes no further stock.
+     *
+     * <p>The lesson is worth keeping. The problem was never "retries are dangerous" — it was that the
+     * operation could not tell two attempts apart. Making it idempotent removed the dilemma rather than
+     * choosing a side of it.
      */
     @CircuitBreaker(name = CATALOG, fallbackMethod = "catalogDown")
-    public BookSnapshot purchase(Long id, int quantity) {
-        return bookClient.purchase(id, Map.of("quantity", quantity));
+    @Retry(name = CATALOG)
+    public BookSnapshot purchase(Long id, int quantity, UUID reservationId) {
+        return bookClient.purchase(id, new BookClient.PurchaseRequest(quantity, reservationId));
+    }
+
+    /**
+     * Gives reserved stock back. The compensating action.
+     *
+     * <p>Retried, and it must be: this runs when something has already gone wrong, and a compensation
+     * that gives up leaves stock held by nothing. Safe to retry because releasing an already-released
+     * reservation is a no-op on book-service's side.
+     */
+    @CircuitBreaker(name = CATALOG, fallbackMethod = "releaseFailed")
+    @Retry(name = CATALOG)
+    public BookSnapshot release(UUID reservationId) {
+        return bookClient.release(reservationId);
     }
 
     /**
@@ -108,12 +129,28 @@ public class CatalogGateway {
 
     /** Fallback for {@link #purchase}. Same reasoning, different signature. */
     @SuppressWarnings("unused")
-    private BookSnapshot catalogDown(Long id, int quantity, Throwable cause) {
+    private BookSnapshot catalogDown(Long id, int quantity, UUID reservationId, Throwable cause) {
         rethrowIfBusinessAnswer(cause);
         log.warn("Stock reservation for book {} x{} failed ({}); returning 503",
                 id, quantity, cause.toString());
         throw new CatalogUnavailableException(
                 "The catalog is unavailable (book " + id + ")", cause);
+    }
+
+    /**
+     * Fallback for {@link #release}.
+     *
+     * <p>Logged at ERROR because this is the bad case: stock is held and the compensation could not run.
+     * It still throws, so the caller decides what to do — {@code OrderRecoveryJob} leaves the order
+     * PENDING and tries again, which is the only correct response to "I could not clean up".
+     */
+    @SuppressWarnings("unused")
+    private BookSnapshot releaseFailed(UUID reservationId, Throwable cause) {
+        rethrowIfBusinessAnswer(cause);
+        log.error("Could not release reservation {} ({}). Stock remains held.",
+                reservationId, cause.toString());
+        throw new CatalogUnavailableException(
+                "The catalog is unavailable (release " + reservationId + ")", cause);
     }
 
     /**

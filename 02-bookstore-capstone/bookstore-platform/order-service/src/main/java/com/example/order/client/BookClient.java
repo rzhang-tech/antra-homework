@@ -7,7 +7,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.GetMapping;
 
-import java.util.Map;
+import java.util.UUID;
 
 /**
  * order-service's view of book-service.
@@ -42,5 +42,15 @@ public interface BookClient {
      * whole of the saga problem, and 5d takes it seriously.
      */
     @PostMapping("/api/books/{id}/purchase")
-    BookSnapshot purchase(@PathVariable("id") Long id, @RequestBody Map<String, Integer> body);
+    BookSnapshot purchase(@PathVariable("id") Long id, @RequestBody PurchaseRequest body);
+
+    /**
+     * Returns reserved stock. The compensating call, and the reason a failed saga can be undone at all.
+     */
+    @PostMapping("/api/books/reservations/{reservationId}/release")
+    BookSnapshot release(@PathVariable("reservationId") UUID reservationId);
+
+    /** The request body for {@link #purchase}. A record rather than a Map, so the field names are typed. */
+    record PurchaseRequest(Integer quantity, UUID reservationId) {
+    }
 }

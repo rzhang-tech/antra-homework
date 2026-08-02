@@ -53,6 +53,9 @@ class BookServiceImplTest {
     @Mock
     private AuthorRepository authorRepository;
 
+    @Mock
+    private com.example.book.repository.StockReservationRepository reservationRepository;
+
     @InjectMocks
     private BookServiceImpl bookService;
 
@@ -225,7 +228,7 @@ class BookServiceImplTest {
             Book existing = book(1L, 12);
             when(bookRepository.findById(1L)).thenReturn(Optional.of(existing));
 
-            BookResponseDto result = bookService.purchase(1L, 5);
+            BookResponseDto result = bookService.purchase(1L, 5, null);
 
             assertThat(existing.getStock()).isEqualTo(7);
             assertThat(result.stock()).isEqualTo(7);
@@ -237,7 +240,7 @@ class BookServiceImplTest {
             Book existing = book(1L, 3);
             when(bookRepository.findById(1L)).thenReturn(Optional.of(existing));
 
-            bookService.purchase(1L, 3);
+            bookService.purchase(1L, 3, null);
 
             assertThat(existing.getStock()).isZero();
         }
@@ -248,7 +251,7 @@ class BookServiceImplTest {
             Book existing = book(1L, 3);
             when(bookRepository.findById(1L)).thenReturn(Optional.of(existing));
 
-            assertThatThrownBy(() -> bookService.purchase(1L, 4))
+            assertThatThrownBy(() -> bookService.purchase(1L, 4, null))
                     .isInstanceOf(InsufficientStockException.class)
                     .hasMessageContaining("only 3");
 
