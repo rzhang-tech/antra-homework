@@ -59,8 +59,17 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                     var authorities = List.of(
                             new SimpleGrantedAuthority("ROLE_" + jwtUtil.roleOf(claims)));
 
+                    // The principal became an AuthenticatedUser in Step 9. It was the username string
+                    // for seven steps, which was enough while every rule was about roles; browsing
+                    // history is the first rule about a person. Nothing in this service read the
+                    // principal as a String, so the change was contained - checked before making it,
+                    // because a principal type is the kind of thing half a codebase quietly assumes.
                     var authentication = new UsernamePasswordAuthenticationToken(
-                            jwtUtil.usernameOf(claims), null, authorities);
+                            new AuthenticatedUser(
+                                    jwtUtil.userIdOf(claims),
+                                    jwtUtil.usernameOf(claims),
+                                    jwtUtil.roleOf(claims)),
+                            null, authorities);
                     authentication.setDetails(
                             new WebAuthenticationDetailsSource().buildDetails(request));
 

@@ -59,6 +59,15 @@
             <artifactId>spring-retry</artifactId>
         </dependency>
 
+        <!--
+          Step 9. DynamoDB only - the SDK is modular, and pulling `aws-sdk-java` whole would add every
+          AWS service ever written to this service's classpath and start-up scan.
+        -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>dynamodb</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>

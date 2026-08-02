@@ -49,6 +49,13 @@ public class JwtUtil {
 
     private static final String CLAIM_ROLE = "role";
 
+    /**
+     * The user's database id, added to the token in Step 5b so that services with no users table can
+     * still record <em>who</em> did something. book-service ignored it until Step 9, when browsing
+     * history gave it its first reason to care which person is asking rather than which role.
+     */
+    private static final String CLAIM_USER_ID = "uid";
+
     private final SecretKey key;
     private final Duration expiration;
     private final String issuer;
@@ -97,6 +104,14 @@ public class JwtUtil {
      * make. Sharing the enum in a common jar would trade this small duplication for a lockstep release
      * between two services that otherwise have nothing to do with each other (D12).
      */
+    /**
+     * May be null for a token minted before {@code uid} existed, or by a service token that represents
+     * no person. Callers must cope: recording browsing history for nobody is skipped, not crashed.
+     */
+    public Long userIdOf(Claims claims) {
+        return claims.get(CLAIM_USER_ID, Long.class);
+    }
+
     public String roleOf(Claims claims) {
         return claims.get(CLAIM_ROLE, String.class);
     }

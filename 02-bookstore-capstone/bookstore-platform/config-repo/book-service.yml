@@ -2,3 +2,27 @@
 
 server:
   port: 8082
+
+app:
+  aws:
+    # Region for every AWS call this service makes. Not `spring.cloud.aws.*` - this project uses the
+    # AWS SDK directly rather than Spring Cloud AWS, because two of the four Step 9 services are used
+    # from a Lambda that has no Spring context at all, and one SDK across both is one thing to know.
+    region: us-east-1
+
+    dynamodb:
+      browsing-history-table: UserBrowsingHistory
+
+      # Empty in dev and in prod: the SDK resolves the real regional endpoint. Tests override it to
+      # point at a local DynamoDB. Deliberately NOT a profile switch - running the platform locally
+      # talks to real AWS, and nothing pretends otherwise.
+      endpoint: ""
+
+  history:
+    # 30 days, as an ISO-8601 duration so it is a Duration rather than a number with a unit in a
+    # comment. Written into each item as `expiresAt`; DynamoDB's TTL sweeper does the deleting.
+    #
+    # It is a retention POLICY, not a guarantee: DynamoDB removes expired items within roughly 48
+    # hours, not at the second they expire, and returns them from queries until it does. The query
+    # filters on expiresAt for that reason.
+    retention: P30D

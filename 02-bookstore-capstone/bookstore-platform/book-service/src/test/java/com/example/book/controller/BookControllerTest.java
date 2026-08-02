@@ -71,6 +71,11 @@ class BookControllerTest {
 
     @MockitoBean private BookService bookService;
 
+    // Step 9a. The slice loads the controller and nothing behind it, so every collaborator has to be
+    // named here - which is the slice doing its job: adding a dependency to a controller is a change
+    // to its contract with the layer below, and this test failing is that change being noticed.
+    @MockitoBean private com.example.book.service.BrowsingHistoryService browsingHistory;
+
     /*
      * SecurityConfig also declares the AuthenticationManager, which needs a UserDetailsService and a
      * PasswordEncoder — both of which reach the database and have no place in a web slice. They are

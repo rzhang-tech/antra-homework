@@ -550,3 +550,51 @@ GET {{gateway}}/actuator/env
 ### 44. The gateway's own actuator, on the management port. In Step 10 only 8080 is
 ### named in the Service, so this is unreachable from outside the pod by construction.
 GET http://localhost:9090/actuator/gateway/routes
+
+### ---------------------------------------------------------------------------
+### Step 9a — browsing history in DynamoDB
+### ---------------------------------------------------------------------------
+###
+### Needs real AWS. Create the table first, once:
+###   ./scripts/aws/dynamodb-browsing-history.sh
+###
+### Nothing here configures a credential. The SDK's default provider chain finds
+### whatever `aws configure` wrote, and in Step 10 will find an IRSA role instead
+### with no code change - which is why there is no app.aws.access-key property.
+
+### 45. View a book AS A LOGGED-IN USER. Time this: the DynamoDB write happens on
+### another thread and the read is unaffected. Repeat with 3, 4, then 2 again.
+GET {{gateway}}/api/books/2
+Authorization: Bearer {{gwToken}}
+
+### 46. The SAME endpoint with no token. Public, still 200, and it records nothing -
+### there is no partition key for a person who has not said who they are.
+GET {{gateway}}/api/books/2
+
+### 47. Recently viewed, newest first. The order comes from reading the sort key
+### BACKWARDS (ScanIndexForward=false), not from sorting in Java - so `limit`
+### applies to the newest items rather than to the oldest ones.
+###
+### `/me/` rather than `/{userId}/` on purpose: an endpoint that took a user id in
+### the path would need a check that the caller may read it.
+GET {{gateway}}/api/books/me/history?limit=10
+Authorization: Bearer {{gwToken}}
+
+### 48. Without a token -> 401 at the edge. Note that /api/books/* is a PUBLIC route
+### and this is not caught by it: a single * does not cross a /, so
+### /api/books/me/history is two segments and stays protected.
+GET {{gateway}}/api/books/me/history
+
+###
+### What the API cannot show you - the item SHAPE, which is where the bugs are:
+###
+###   aws dynamodb query --table-name UserBrowsingHistory \
+###     --key-condition-expression "userId = :u" \
+###     --expression-attribute-values '{":u":{"S":"2"}}' --no-scan-index-forward
+###
+### Check two things in the output:
+###   expiresAt is an "N" with TEN digits   epoch SECONDS. Millis would set expiry to
+###                                          the year 33658 and DynamoDB would never
+###                                          delete anything, silently.
+###   viewedAt ends in Z                     ISO-8601 UTC, so the sort key's string
+###                                          order IS its chronological order.

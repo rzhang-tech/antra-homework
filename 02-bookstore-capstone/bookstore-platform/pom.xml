@@ -49,6 +49,8 @@
         <spring-security-rsa.version>1.1.5</spring-security-rsa.version>
         <!-- Release train aligned to Boot 3.5.x — see D1 -->
         <spring-cloud.version>2025.0.3</spring-cloud.version>
+        <!-- Not managed by Boot or by the Spring Cloud release train; pinned here like jjwt. -->
+        <aws-sdk.version>2.32.14</aws-sdk.version>
     </properties>
 
     <dependencyManagement>
@@ -57,6 +59,13 @@
                 <groupId>org.springframework.cloud</groupId>
                 <artifactId>spring-cloud-dependencies</artifactId>
                 <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>software.amazon.awssdk</groupId>
+                <artifactId>bom</artifactId>
+                <version>${aws-sdk.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>

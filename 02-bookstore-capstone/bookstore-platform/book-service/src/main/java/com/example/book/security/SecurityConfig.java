@@ -65,6 +65,13 @@ public class SecurityConfig {
 
                         // Browsing the catalog is public — an anonymous visitor must be able to shop
                         // before deciding to register.
+                        // Declared BEFORE the public catalogue rules below, because the first match
+                        // wins and "/api/books/*" would otherwise be asked about it first. It does not
+                        // actually match - a single * does not cross a / - but relying on that is
+                        // relying on a subtlety, and the ordering says what is meant.
+                        .requestMatchers(HttpMethod.GET, "/api/books/me/history")
+                            .hasAnyRole("USER", "ADMIN")
+
                         .requestMatchers(HttpMethod.GET, "/api/books", "/api/books/*", "/api/authors")
                             .permitAll()
 

@@ -27,6 +27,22 @@ spring:
     locations: classpath:db/migration
 
 app:
+  aws:
+    # Step 9a. The config-move rule from config-repo/README.md - these keys live in the config repo and
+    # tests do not read the config server, so without them the context fails to start on an
+    # unresolvable placeholder that mentions neither DynamoDB nor configuration.
+    #
+    # Nested INSIDE the existing `app:` rather than appended as a second one. YAML has no merge for
+    # duplicate top-level keys and SnakeYAML refuses the document outright - which at least fails
+    # loudly, unlike most of this step's traps.
+    region: us-east-1
+    dynamodb:
+      browsing-history-table: UserBrowsingHistory-test
+      endpoint: ""
+
+  history:
+    retention: P30D
+
   jwt:
     # Test-only, and irrelevant beyond satisfying the length constraint — nothing signed here outlives
     # the test JVM.
