@@ -10,4 +10,8 @@ public class ResourceNotFoundException extends RuntimeException {
     public static ResourceNotFoundException book(Long id) {
         return new ResourceNotFoundException("Book not found with id " + id);
     }
+
+    public static ResourceNotFoundException author(Long id) {
+        return new ResourceNotFoundException("Author not found with id " + id);
+    }
 }

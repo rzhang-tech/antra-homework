@@ -3,9 +3,11 @@ package com.example.bookstore.service;
 import com.example.bookstore.dto.BookRequestDto;
 import com.example.bookstore.dto.BookResponseDto;
 import com.example.bookstore.dto.PageResponseDto;
+import com.example.bookstore.entity.Author;
 import com.example.bookstore.entity.Book;
 import com.example.bookstore.exception.DuplicateResourceException;
 import com.example.bookstore.exception.ResourceNotFoundException;
+import com.example.bookstore.repository.AuthorRepository;
 import com.example.bookstore.repository.BookRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
@@ -24,6 +26,7 @@ public class BookServiceImpl implements BookService {
      * passed in directly by a unit test with no Spring context.
      */
     private final BookRepository bookRepository;
+    private final AuthorRepository authorRepository;
 
     @Override
     @Transactional(readOnly = true)
@@ -51,6 +54,7 @@ public class BookServiceImpl implements BookService {
                 .isbn(request.isbn())
                 .price(request.price())
                 .stock(request.stock())
+                .author(resolveAuthor(request.authorId()))
                 .build();
         return BookResponseDto.from(bookRepository.save(book));
     }
@@ -67,6 +71,7 @@ public class BookServiceImpl implements BookService {
         book.setIsbn(request.isbn());
         book.setPrice(request.price());
         book.setStock(request.stock());
+        book.setAuthor(resolveAuthor(request.authorId()));
         // No explicit save() call: `book` is a managed entity inside this transaction, so Hibernate
         // flushes the changes on commit (dirty checking).
         return BookResponseDto.from(book);
@@ -80,5 +85,17 @@ public class BookServiceImpl implements BookService {
 
     private Book getOrThrow(Long id) {
         return bookRepository.findById(id).orElseThrow(() -> ResourceNotFoundException.book(id));
+    }
+
+    /**
+     * A null author id means "no author on record" and is allowed; a non-null id that matches nothing is
+     * a client error, not a silently-ignored field.
+     */
+    private Author resolveAuthor(Long authorId) {
+        if (authorId == null) {
+            return null;
+        }
+        return authorRepository.findById(authorId)
+                .orElseThrow(() -> ResourceNotFoundException.author(authorId));
     }
 }

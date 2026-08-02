@@ -2,9 +2,12 @@ package com.example.bookstore.entity;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 import lombok.AllArgsConstructor;
@@ -20,8 +23,7 @@ import java.time.Instant;
 /**
  * A book in the catalog.
  *
- * <p>The {@code author} relation, the database index on {@code title}, and Flyway-managed DDL all
- * arrive in Step 2 — this step models the single aggregate the CRUD endpoints operate on.
+ * <p>The database index on {@code title} arrives in Step 2d.
  */
 @Entity
 @Table(name = "book")
@@ -41,6 +43,20 @@ public class Book {
 
     @Column(unique = true)
     private String isbn;
+
+    /**
+     * Many books, one author.
+     *
+     * <p>{@code LAZY} means Hibernate does not join to {@code author} when loading a book; it stores a
+     * placeholder and fetches the row only if someone actually reads the field. That is the right
+     * default — a join you did not ask for is wasted work on every query that never touches the author.
+     *
+     * <p>The cost is that reading {@code getAuthor().getName()} for a page of books fires one extra
+     * query <em>per book</em>. That is the N+1 problem, and Step 2c reproduces and fixes it here.
+     */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "author_id")
+    private Author author;
 
     @Column(nullable = false, precision = 10, scale = 2)
     private BigDecimal price;

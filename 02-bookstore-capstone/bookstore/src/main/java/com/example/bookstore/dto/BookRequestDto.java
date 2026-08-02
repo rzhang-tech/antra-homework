@@ -29,6 +29,12 @@ public record BookRequestDto(
 
         @NotNull(message = "stock is required")
         @PositiveOrZero(message = "stock cannot be negative")
-        Integer stock
+        Integer stock,
+
+        /**
+         * The author's id, or null for a book with no author on record. A client sends the id rather
+         * than a nested author object: creating a book must not silently create an author.
+         */
+        Long authorId
 ) {
 }

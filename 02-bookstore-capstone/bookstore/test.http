@@ -1,5 +1,6 @@
-### Step 1 — Book CRUD
-### Run the app with `./mvnw spring-boot:run`, then execute these top to bottom.
+### Book CRUD
+### Start PostgreSQL first (`docker compose up -d` from 02-bookstore-capstone/), then
+### `./mvnw spring-boot:run`, then execute these top to bottom.
 ### Every endpoint is public at this stage; Step 3 adds JWT and the ADMIN role.
 
 @host = http://localhost:8080
@@ -19,7 +20,7 @@ GET {{host}}/api/books/1
 ### 5. Get a missing book -> 404 with the ErrorResponse envelope
 GET {{host}}/api/books/9999
 
-### 6. Create a book -> 201 + Location header
+### 6. Create a book with an author -> 201 + Location header
 POST {{host}}/api/books
 Content-Type: application/json
 
@@ -27,7 +28,31 @@ Content-Type: application/json
   "title": "Refactoring",
   "isbn": "9780134757599",
   "price": 47.99,
-  "stock": 10
+  "stock": 10,
+  "authorId": 2
+}
+
+### 6b. authorId is optional — a book with no author on record -> 201
+POST {{host}}/api/books
+Content-Type: application/json
+
+{
+  "title": "Anonymous Manual",
+  "isbn": "9999999999999",
+  "price": 9.99,
+  "stock": 1
+}
+
+### 6c. A non-existent authorId is a client error, not a silently-dropped field -> 404
+POST {{host}}/api/books
+Content-Type: application/json
+
+{
+  "title": "Ghost",
+  "isbn": "8888888888888",
+  "price": 9.99,
+  "stock": 1,
+  "authorId": 9999
 }
 
 ### 7. Create with a duplicate ISBN -> 409

@@ -188,7 +188,48 @@ Two design notes worth reading before Step 2b: [D6](../docs/decisions.md) (why F
 `ddl-auto`) and [D7](../docs/decisions.md) (why the seed file is repeatable, written up after the
 original versioned attempt broke the migration ordering).
 
-## 2b–2e — still to do
+## 2b — the Author relation ☑
 
-`Author` entity and relation · the N+1 problem, reproduced then fixed · a justified index plus
-`EXPLAIN ANALYZE` · `@Version` optimistic locking under concurrent writes.
+`V2__add_author.sql` creates the `author` table and gives `book` a nullable `author_id` with a foreign
+key. Nullable is not laziness: a `NOT NULL` column cannot be added to a table that already has rows
+without either a default or a backfill, and books genuinely may have no author on record.
+
+| File | Change |
+|------|--------|
+| `entity/Author.java` | new — id + name, one-directional for now |
+| `entity/Book.java` | `@ManyToOne(fetch = LAZY) @JoinColumn(name = "author_id")` |
+| `repository/AuthorRepository.java` | new |
+| `dto/BookRequestDto.java` | `authorId` (optional) |
+| `dto/BookResponseDto.java` | `authorId` + `authorName`, flattened |
+| `service/BookServiceImpl.java` | `resolveAuthor(...)` — null is allowed, an unknown id is a 404 |
+| `db/seed/R__dev_sample_books.sql` | five authors, linked to the demo books |
+
+**Why the request takes an `authorId` and not a nested author object.** Creating a book must not
+silently create an author. An id says "attach this book to an author that already exists"; a nested
+object invites the API to guess whether to insert, update, or match by name.
+
+**Why `Author` has no `List<Book>` yet.** A one-directional relation is enough to model "a book has an
+author," and every relation you add costs something (serialization recursion, cascade semantics,
+`equals`/`hashCode` care). The back-reference arrives in 2c, when listing authors with their books is
+what creates the N+1 problem that step is about.
+
+**The N+1 is already visible.** `LAZY` means the author row is fetched only when someone reads the
+field — and `BookResponseDto.from` reads it for every book. One `GET /api/books?size=5` now issues:
+
+```
+select ... from book b1_0 order by b1_0.id offset ? rows fetch first ? rows only
+select count(b1_0.id) from book b1_0
+select a1_0.id, a1_0.name from author a1_0 where a1_0.id=?    -- binding [5]
+select a1_0.id, a1_0.name from author a1_0 where a1_0.id=?    -- binding [2]
+select a1_0.id, a1_0.name from author a1_0 where a1_0.id=?    -- binding [4]
+select a1_0.id, a1_0.name from author a1_0 where a1_0.id=?    -- binding [1]
+select a1_0.id, a1_0.name from author a1_0 where a1_0.id=?    -- binding [3]
+```
+
+Seven queries for five books: one for the page, one for the count, and **one per book** for the author.
+Ask for 100 books and it is 102 queries. Step 2c measures this properly and fixes it.
+
+## 2c–2e — still to do
+
+The N+1 problem, reproduced then fixed · a justified index plus `EXPLAIN ANALYZE` · `@Version`
+optimistic locking under concurrent writes.
