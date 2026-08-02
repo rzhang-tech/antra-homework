@@ -882,7 +882,77 @@ Two details that cost time and are worth writing down:
   `AuthenticationManager` bean can be constructed. Nothing exercises them: `@WithMockUser` supplies the
   identity directly, which is what keeps these tests about *authorization* rather than login.
 
-## 4c — still to do
+## 4c — end-to-end integration ☑
 
-One full `@SpringBootTest` path through HTTP → security → service → real database, and a Postman-style
-end-to-end check.
+**6 tests, nothing mocked.** Real HTTP on a real servlet port, through the real security filter chain,
+into the real services, against the Testcontainers PostgreSQL.
+
+That is the point of having them. The unit tests mock the repository; the web slice mocks the service.
+Each proves its own layer and neither proves the layers fit together — that a token minted by
+`/api/auth/login` is accepted by `/api/books/{id}/purchase`, and that the resulting decrement actually
+lands in PostgreSQL, can only be established by doing all of it.
+
+| Test | Proves |
+|------|--------|
+| `fullCustomerJourney` | register → browse anonymously → login → `/me` with the token → purchase → **stock in the database is 17, not just in the response** |
+| `anonymousPurchaseChangesNothing` | 401, and stock still 20 |
+| `tamperedTokenIsRejected` | payload rewritten to `"ADMIN"`, signature untouched → 401 over real HTTP |
+| `roleRulesHoldOverRealHttp` | same request: customer 403, admin 201 |
+| `overbuyingIsRejected` | 409 with `"only 20"`, stock unchanged |
+| `concurrentPurchasesNeverOversell` | 20 simultaneous purchases; no lost update, no 500, stock never negative |
+
+### The concurrency test asserts invariants, not counts
+
+How many of the 20 requests conflict depends on thread timing, so asserting "5 succeed" would be a
+flaky test. What must hold every time:
+
+```java
+assertThat(succeeded + conflicted).isEqualTo(attempts);        // no other outcome — in particular no 500
+assertThat(stockInDatabase()).isEqualTo(20 - succeeded);       // no lost update
+assertThat(stockInDatabase()).isNotNegative();                 // never oversold
+```
+
+Step 2e proved the same property by hand with a Node script. This runs it in CI, on every commit,
+forever. The application log during the run is full of
+`Optimistic lock conflict on POST /api/books/1/purchase` — the lock is genuinely being exercised, not
+merely present.
+
+### Two things about `@SpringBootTest` with a real port
+
+**It does not roll back.** The server handles each request on its own thread in its own transaction, so
+the test's transaction has nothing to undo. Every test therefore creates its own fixture with a unique
+ISBN rather than assuming a clean database.
+
+**Named for purchase, not orders.** The assignment lists `OrderFlowIntegrationTest`, but orders do not
+exist until Step 5. Purchase is the same shape — authenticate, mutate stock transactionally, observe the
+result — and the class gets renamed when there is a real order flow to cover.
+
+---
+
+# Step 4 complete
+
+**50 tests, 26 seconds, one command, nothing running beforehand.**
+
+```bash
+./mvnw test     # Tests run: 50, Failures: 0, Errors: 0 — BUILD SUCCESS
+```
+
+| Layer | Count | Speed | Mocks | Answers |
+|-------|-------|-------|-------|---------|
+| Unit (`@ExtendWith(MockitoExtension)`) | 22 | ms | repository | are the business rules right? |
+| Repository (`@DataJpaTest`) | 9 | ~8 s | none | is the SQL valid and does the schema match? |
+| Web (`@WebMvcTest`) | 12 | ~4 s | service | is the HTTP contract right? |
+| Integration (`@SpringBootTest`) | 6 | ~12 s | none | do the layers actually fit together? |
+| Smoke | 1 | — | none | does the context start? |
+
+The shape is deliberate: many fast tests that pin down logic, few slow ones that pin down integration.
+Inverting it produces a suite nobody runs.
+
+## Next — Step 5
+
+Split the monolith into `user-service`, `book-service`, `order-service` and `payment-service`, each with
+its own database. A method call that could not fail becomes a network call that can; a transaction that
+spanned two tables now spans two databases with no shared ACID guarantee. OpenFeign with timeouts,
+Resilience4j circuit breakers, and identity propagated across service boundaries.
+
+These 50 tests exist so that refactor can be checked rather than hoped about.
