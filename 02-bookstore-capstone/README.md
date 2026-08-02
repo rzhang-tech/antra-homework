@@ -62,7 +62,8 @@ Starts on `http://localhost:8080` under the `dev` profile. On first boot Flyway 
 `db/migration` and loads five demo books from `db/seed`; on later boots it reports "up to date" and the
 data persists across restarts.
 
-Run the tests (PostgreSQL must be up — Step 4 removes that requirement with Testcontainers):
+Run the tests — these need **nothing** running beforehand; Testcontainers starts and disposes of its
+own PostgreSQL:
 
 ```bash
 cd bookstore && ./mvnw test

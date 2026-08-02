@@ -115,7 +115,7 @@ docker exec -it bookstore-postgres psql -U bookstore -d bookstore
 ./mvnw test
 ```
 
-Tests currently need PostgreSQL running — Step 4 removes that with Testcontainers.
+Tests need nothing running: Testcontainers starts its own PostgreSQL and disposes of it (Step 4b).
 
 ## Verified behaviour
 
@@ -794,7 +794,95 @@ A mock will happily agree with a query that PostgreSQL would reject. These tests
 whether the SQL is valid, whether the entity mapping matches the schema, or whether the transaction
 commits. That is what 4b and 4c are for.
 
-## 4b–4c — still to do
+## 4b — slice tests on a real database ☑
 
-`@DataJpaTest` and `@WebMvcTest` slices on Testcontainers · one full `@SpringBootTest` path · security
-tests asserting 401/403 · removing the need for a running PostgreSQL before `./mvnw test`.
+**44 tests, 21.8 seconds — and no PostgreSQL running beforehand.**
+
+```bash
+docker compose stop     # nothing listening on 5432
+./mvnw test             # Tests run: 44, Failures: 0, Errors: 0 — BUILD SUCCESS
+```
+
+That is the headline change. Until now `./mvnw test` required someone to have run `docker compose up -d`
+first, an instruction that works for a person at a keyboard and not at all for CI.
+
+### Testcontainers, in two lines
+
+```java
+@Bean
+@ServiceConnection
+PostgreSQLContainer<?> postgresContainer() {
+    return new PostgreSQLContainer<>("postgres:17-alpine");
+}
+```
+
+`@ServiceConnection` reads the container's host, port, database and credentials once it is up and wires
+the DataSource from them — no `@DynamicPropertySource`, no properties to keep in step with the compose
+file. The image tag matches `docker-compose.yml` on purpose: testing against a different database than
+you deploy on is testing something else.
+
+The container starts in ~2 s and is reused across test classes that share a context. Cleanup is
+automatic — a `ryuk` sidecar reaps everything when the JVM exits.
+
+### `BookRepositoryTest` — 9 tests, `@DataJpaTest`
+
+The slice loads entities, repositories and a transaction manager; no controllers, no security, no
+services. Every test rolls back afterwards.
+
+`@AutoConfigureTestDatabase(replace = NONE)` is essential — by default this slice swaps in an embedded
+database, which would undo the entire point.
+
+What it proves that a mock cannot:
+
+- **The Flyway schema matches the entity mapping.** With `ddl-auto: validate`, a column renamed in a
+  migration but not in the entity fails the context. Reaching the first assertion is the result.
+- **`searchByTitle` is really case-insensitive and really matches mid-word** — against PostgreSQL's
+  collation, not Mockito's opinion.
+- **The unique constraint on `isbn` fires**, and **`CHECK (stock >= 0)` rejects negative stock even when
+  the service is bypassed entirely**. That is the argument for two layers, demonstrated.
+- **`version` defaults to 0 for a row inserted with raw SQL** — the V5 regression, pinned so it cannot
+  come back.
+- **The `@EntityGraph` really joins the author**: the test detaches everything with `entityManager
+  .clear()` and then reads `book.getAuthor().getName()`. A lazy proxy would throw
+  `LazyInitializationException`; it does not.
+
+`entityManager.flush()` then `clear()` in the fixture is not ceremony. Without the clear, reads come
+back from Hibernate's first-level cache, and a broken query still "passes" by returning the object the
+test just put in memory.
+
+**A mistake worth keeping in the notes:** the two constraint tests first wrapped only `flush()` and
+failed. With `GenerationType.IDENTITY` Hibernate cannot defer the INSERT — it needs the generated key
+immediately — so the constraint fires inside `save()`. Under a sequence generator the original version
+would have worked. The tests now wrap save-and-flush together, so they assert on the constraint rather
+than on the id strategy.
+
+### `BookControllerTest` — 12 tests, `@WebMvcTest`
+
+Spring MVC and nothing else; the service is a `@MockitoBean`. These are about the HTTP contract: given
+that the service returns X or throws Y, what does the client see?
+
+| Group | Asserts |
+|-------|---------|
+| public reads | 200 and the JSON shape — including that `version` is **not** in the response |
+| authorization | anonymous 401, USER 403, ADMIN 201/204 — and `verify(never())` that a rejected request never reaches the service |
+| validation | 400 naming every failed field, service never invoked |
+| domain errors | 409 for duplicate ISBN and for insufficient stock, with the numbers preserved |
+| unexpected errors | 500 whose body does **not** contain the internal message |
+
+The security classes are imported explicitly. Without them the slice runs Spring Security's defaults
+rather than ours, and the authorization assertions would be testing the framework instead of this
+application.
+
+Two details that cost time and are worth writing down:
+
+- **`with(csrf())` on every mutating request.** The real chain disables CSRF — it is a token-authenticated
+  API — but MockMvc's security setup applies it anyway, and a missing token shows up as a 403 that looks
+  exactly like an authorization failure.
+- **`UserDetailsService` and `PasswordEncoder` are mocked** purely so `SecurityConfig`'s
+  `AuthenticationManager` bean can be constructed. Nothing exercises them: `@WithMockUser` supplies the
+  identity directly, which is what keeps these tests about *authorization* rather than login.
+
+## 4c — still to do
+
+One full `@SpringBootTest` path through HTTP → security → service → real database, and a Postman-style
+end-to-end check.

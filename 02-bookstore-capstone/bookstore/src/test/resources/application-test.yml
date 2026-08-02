@@ -1,0 +1,26 @@
+# The profile every test runs under.
+#
+# No datasource block: Testcontainers supplies one at runtime through @ServiceConnection, and hard-coding
+# a URL here is exactly the coupling to a hand-started database that Testcontainers removes.
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+  flyway:
+    # db/migration only. The dev seed is deliberately absent: a test that depends on demo rows breaks
+    # the moment someone edits the seed file, and "which rows exist" should be the test's own decision.
+    locations: classpath:db/migration
+
+app:
+  jwt:
+    # Test-only, and irrelevant beyond satisfying the length constraint — nothing signed here outlives
+    # the test JVM.
+    secret: test-only-signing-key-not-used-anywhere-else-0123456789
+    expiration-minutes: 60
+    issuer: bookstore
+
+logging:
+  level:
+    org.springframework.web: WARN
+    org.hibernate: WARN
