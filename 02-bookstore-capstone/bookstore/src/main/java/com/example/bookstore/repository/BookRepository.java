@@ -5,20 +5,30 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 import java.util.Optional;
 
 public interface BookRepository extends JpaRepository<Book, Long> {
 
     /**
-     * Keyword search over the title, paged. Spring Data derives the query from the method name:
-     * {@code WHERE lower(title) LIKE lower('%' || :keyword || '%')}.
+     * Case-insensitive keyword search over the title, paged.
      *
-     * <p>Note the leading wildcard — it prevents a plain B-tree index on {@code title} from being used.
-     * Step 2d revisits this with EXPLAIN ANALYZE.
+     * <p><strong>Written out rather than derived from the method name, on purpose.</strong> The derived
+     * form — {@code findByTitleContainingIgnoreCase} — generates {@code UPPER(title) LIKE UPPER(?)},
+     * while the trigram index in {@code V3__add_book_indexes.sql} is built on {@code lower(title)}. An
+     * expression index is only used when the query's expression matches it character for character, so
+     * the derived query silently fell back to a sequential scan: 21.9 ms against 0.175 ms on 100k rows,
+     * with the index sitting there unused and no warning anywhere.
+     *
+     * <p>Spelling the query out keeps the SQL and the index under the same control and visibly aligned.
+     * The alternative — building the index on {@code upper(title)} to match — works, but leaves the
+     * index depending on a code-generation detail that a Spring Data upgrade could change.
      */
     @EntityGraph(attributePaths = "author")
-    Page<Book> findByTitleContainingIgnoreCase(String keyword, Pageable pageable);
+    @Query("SELECT b FROM Book b WHERE LOWER(b.title) LIKE LOWER(CONCAT('%', :keyword, '%'))")
+    Page<Book> searchByTitle(@Param("keyword") String keyword, Pageable pageable);
 
     /**
      * {@code @EntityGraph} tells Hibernate to load {@code author} in the <em>same</em> query as the

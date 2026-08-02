@@ -292,6 +292,88 @@ Comparing the naive and fetch-join responses byte for byte, they disagreed — s
 it, and the two plans happened to differ. Both paths now order explicitly by id. A result set without
 `ORDER BY` has no guaranteed order, and "it looked sorted in testing" is not a contract.
 
-## 2d–2e — still to do
+## 2d — indexes and query plans ☑
 
-A justified index plus `EXPLAIN ANALYZE` · `@Version` optimistic locking under concurrent writes.
+### Getting a measurable baseline first
+
+On the seven demo rows every plan is a `Seq Scan`, and correctly so: the whole table fits in one page,
+so reading an index and then going back to the heap is strictly more work. Nothing about indexing can be
+demonstrated at that size.
+
+[`scripts/load-benchmark-data.sql`](../scripts/load-benchmark-data.sql) loads 2,000 authors and 100,000
+books. It is **not** a Flyway migration — it is slow, it is noise in the schema history, and it must
+never run outside a local benchmark database. Rows are tagged `BENCH-` so they can be dropped again.
+
+The distribution matters as much as the volume. A first attempt spread 100k books over the five demo
+authors, giving each 20% of the table — and at that selectivity PostgreSQL *correctly refuses* an index,
+because reading a fifth of the rows through one costs more than scanning the table. 2,000 authors puts
+each at ~0.05%, which is what a foreign-key filter looks like in production.
+
+### Before and after
+
+| Query | Before | After | Plan after |
+|-------|--------|-------|------------|
+| `WHERE author_id = ?` (50 of 100k) | 8.5 ms | **0.55 ms** | `Bitmap Index Scan on idx_book_author_id` |
+| `WHERE title = ?` | 6.0 ms | **0.07 ms** | `Index Scan using idx_book_title` |
+| `WHERE lower(title) LIKE '%zebra%'` | 19.8 ms | **0.14 ms** | `Bitmap Index Scan on idx_book_title_trgm` |
+
+### The three indexes, and why each earns its place
+
+**`idx_book_author_id`** — PostgreSQL indexes a PRIMARY KEY automatically but **not** a FOREIGN KEY
+column, which surprises people. This column is filtered on, joined on, and read by the referential
+check that runs on every `DELETE FROM author`.
+
+**`idx_book_title`** — serves exact matches and prefix searches (`LIKE 'Clean%'`). A B-tree is ordered,
+so it can seek to a known prefix.
+
+**`idx_book_title_trgm`** — a B-tree cannot help `LIKE '%keyword%'`. It is sorted by the *start* of the
+string, and a leading wildcard means there is no known start. `pg_trgm` indexes every three-character
+sequence instead, turning a substring match into a lookup.
+
+### The bug this step caught
+
+The trigram index was built on `lower(title)`. The application's search was
+`findByTitleContainingIgnoreCase`, and Spring Data generates `UPPER(title) LIKE UPPER(?)` for
+`IgnoreCase`. **An expression index is only used when the query's expression matches it character for
+character**, so the real query ignored the index completely:
+
+```
+upper(title) LIKE upper('%Zebra%')   Seq Scan             21.9 ms
+lower(title) LIKE lower('%Zebra%')   Bitmap Index Scan     0.175 ms
+```
+
+The index existed, looked correct in `pg_indexes`, and did nothing — with no warning anywhere. Nothing
+short of running `EXPLAIN` on the query the *application* sends would have found it.
+
+The fix is `BookRepository.searchByTitle`, an explicit `@Query` using `LOWER`, so the SQL and the index
+are under one author's control and visibly aligned. Building the index on `upper(title)` instead would
+also work, but leaves it depending on a Spring Data code-generation detail that a version upgrade could
+change.
+
+Verified against the application's exact generated SQL, join and `ESCAPE` clause included:
+
+```
+Limit
+  -> Sort  Sort Key: b1_0.id
+    -> Hash Left Join  Hash Cond: (b1_0.author_id = a1_0.id)
+      -> Bitmap Heap Scan on book b1_0
+        -> Bitmap Index Scan on idx_book_title_trgm
+             Index Cond: (lower((title)::text) ~~ '%zebra%'::text)
+Execution Time: 0.951 ms
+```
+
+### What indexes cost
+
+Inserting the same 20,000 rows, measured on this database:
+
+| | Time |
+|---|---|
+| With all three indexes | 369.8 ms |
+| With none | 84.3 ms |
+
+**4.4× slower writes**, plus disk. That is the trade every index makes, and why "add an index" is a
+decision rather than a reflex — an index nothing queries is pure cost.
+
+## 2e — still to do
+
+`@Version` optimistic locking under concurrent writes.

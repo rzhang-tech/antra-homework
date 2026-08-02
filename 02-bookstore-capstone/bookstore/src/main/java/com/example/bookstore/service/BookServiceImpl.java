@@ -32,7 +32,7 @@ public class BookServiceImpl implements BookService {
     @Transactional(readOnly = true)
     public PageResponseDto<BookResponseDto> findAll(String keyword, Pageable pageable) {
         Page<Book> books = StringUtils.hasText(keyword)
-                ? bookRepository.findByTitleContainingIgnoreCase(keyword.trim(), pageable)
+                ? bookRepository.searchByTitle(keyword.trim(), pageable)
                 : bookRepository.findAll(pageable);
         return PageResponseDto.from(books, BookResponseDto::from);
     }

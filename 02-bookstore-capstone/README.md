@@ -14,7 +14,7 @@ technology enters.
 | Step | Delivers | Status |
 |------|----------|--------|
 | 1 | Monolith skeleton — Book CRUD, layering, validation, AOP | ☑ done |
-| 2 | PostgreSQL, indexes, transactions, N+1, optimistic locking | ◐ in progress — 2a-2c done (PostgreSQL + Flyway, Author relation, N+1 fixed) |
+| 2 | PostgreSQL, indexes, transactions, N+1, optimistic locking | ◐ in progress — 2a-2d done; 2e (optimistic locking) remaining |
 | 3–11 | Security · Testing · Microservices · Config · Kafka · Gateway · AWS · K8s · CI/CD | planned |
 
 ## Layout

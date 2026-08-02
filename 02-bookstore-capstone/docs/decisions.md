@@ -165,6 +165,28 @@ needed the answers are `@BatchSize` or a two-query split (page the ids, then fet
 
 ---
 
+## D10 — Search is an explicit `@Query`, not a derived method name
+
+**Decision.** `BookRepository.searchByTitle` spells out
+`LOWER(b.title) LIKE LOWER(CONCAT('%', :keyword, '%'))` instead of using the derived
+`findByTitleContainingIgnoreCase`.
+
+**Why.** The trigram index is built on `lower(title)`. Spring Data generates `UPPER(title) LIKE UPPER(?)`
+for the `IgnoreCase` keyword, and an expression index is only used when the query's expression matches
+it character for character — so the derived query fell back to a sequential scan while the index sat
+unused: 21.9 ms against 0.175 ms on 100k rows, with nothing logged or warned. Writing the query out puts
+the SQL and the index under one author's control, where the mismatch is visible in review.
+
+**Alternative considered.** Building the index on `upper(title)` to match the generated SQL. It works,
+but makes the index depend on a code-generation detail of the framework rather than on anything stated
+in the codebase, and a Spring Data upgrade could quietly break it.
+
+**General lesson worth keeping.** Always run `EXPLAIN` against the SQL the *application* emits, captured
+from the logs — not against a hand-written approximation of it. The two differed here in exactly the one
+respect that mattered.
+
+---
+
 ## D5 — Cross-service references are plain IDs, not foreign keys
 
 **Decision.** `order_item.book_id` and `orders.user_id` are plain `BIGINT` columns with no FK constraint.
