@@ -1,0 +1,13 @@
+spring:
+  application:
+    name: bookstore
+  profiles:
+    # Overridable at runtime: --spring.profiles.active=prod, or SPRING_PROFILES_ACTIVE=prod
+    default: dev
+  jpa:
+    open-in-view: false   # fail loudly on lazy loading outside a transaction instead of hiding N+1s
+
+server:
+  port: 8080
+  error:
+    include-stacktrace: never   # never leak internals; GlobalExceptionHandler owns the error body

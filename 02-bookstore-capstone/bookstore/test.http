@@ -1,0 +1,79 @@
+### Step 1 — Book CRUD
+### Run the app with `./mvnw spring-boot:run`, then execute these top to bottom.
+### Every endpoint is public at this stage; Step 3 adds JWT and the ADMIN role.
+
+@host = http://localhost:8080
+
+### 1. List books (paged, seeded with 5 rows under the dev profile)
+GET {{host}}/api/books
+
+### 2. List with paging and sorting
+GET {{host}}/api/books?page=0&size=2&sort=price,desc
+
+### 3. Keyword search over the title
+GET {{host}}/api/books?keyword=java
+
+### 4. Get one book -> 200
+GET {{host}}/api/books/1
+
+### 5. Get a missing book -> 404 with the ErrorResponse envelope
+GET {{host}}/api/books/9999
+
+### 6. Create a book -> 201 + Location header
+POST {{host}}/api/books
+Content-Type: application/json
+
+{
+  "title": "Refactoring",
+  "isbn": "9780134757599",
+  "price": 47.99,
+  "stock": 10
+}
+
+### 7. Create with a duplicate ISBN -> 409
+POST {{host}}/api/books
+Content-Type: application/json
+
+{
+  "title": "Refactoring (again)",
+  "isbn": "9780134757599",
+  "price": 47.99,
+  "stock": 1
+}
+
+### 8. Create with invalid fields -> 400 with per-field messages
+POST {{host}}/api/books
+Content-Type: application/json
+
+{
+  "title": "",
+  "price": -5,
+  "stock": -1
+}
+
+### 9. Update a book -> 200
+PUT {{host}}/api/books/1
+Content-Type: application/json
+
+{
+  "title": "Clean Code (2nd printing)",
+  "isbn": "9780132350884",
+  "price": 39.99,
+  "stock": 20
+}
+
+### 10. Update a missing book -> 404
+PUT {{host}}/api/books/9999
+Content-Type: application/json
+
+{
+  "title": "Ghost",
+  "price": 10.00,
+  "stock": 1
+}
+
+### 11. Delete a book -> 204 No Content
+DELETE {{host}}/api/books/5
+
+### 12. Delete it again -> 404
+DELETE {{host}}/api/books/5

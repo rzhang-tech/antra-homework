@@ -1,0 +1,28 @@
+# Local development: in-memory H2, schema generated from the entities, seeded with sample rows.
+# Step 2 replaces this with PostgreSQL + Flyway migrations.
+spring:
+  datasource:
+    url: jdbc:h2:mem:bookstore;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  h2:
+    console:
+      enabled: true   # browse the data at http://localhost:8080/h2-console
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    # data.sql must run *after* Hibernate has created the tables, not before
+    defer-datasource-initialization: true
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+  sql:
+    init:
+      mode: always   # run data.sql on startup
+
+logging:
+  level:
+    com.example.bookstore: DEBUG            # makes the LoggingAspect's argument logging visible
+    org.hibernate.orm.jdbc.bind: TRACE      # show the values bound into prepared statements
