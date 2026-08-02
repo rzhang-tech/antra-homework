@@ -737,9 +737,64 @@ future direct `INSERT` from recreating the same landmine.
 | 3b | JWT issued on login, verified per request, proven against tampering |
 | 3c | Public / USER / ADMIN enforced on every endpoint, deny by default |
 
-## Next — Step 4
+---
 
-Testing: unit tests with Mockito, `@WebMvcTest` and `@DataJpaTest` slices, and one full integration test
-on Testcontainers — which also removes the current requirement that PostgreSQL be running before
-`./mvnw test`. Deliberately before Step 5's refactor: tests written after a refactor only prove what the
-refactor produced.
+# Step 4 — Testing
+
+Deliberately before Step 5's refactor. Tests written *after* a refactor only prove what the refactor
+produced; written before, they prove it did not change behaviour.
+
+## 4a — unit tests ☑
+
+**22 tests, 1.7 seconds, no Spring context and no database.**
+
+| File | Covers |
+|------|--------|
+| `service/BookServiceImplTest.java` | 15 tests — find, create, update, purchase, delete |
+| `service/UserServiceImplTest.java` | 7 tests — registration and login |
+
+`@ExtendWith(MockitoExtension.class)` builds the mocks and injects them; the service under test is a
+plain object. That speed is the point — these run on every save, so they must never wait on
+infrastructure.
+
+They also express situations a real database makes awkward. "The repository claims this ISBN exists" is
+one stubbed line here; arranging it for real means inserting a row first.
+
+### What they assert that matters
+
+- **`update` never calls `save`.** The absence is the behaviour, not an omission —
+  `verify(bookRepository, never()).save(any())` pins dirty checking in place, so a later "fix" that adds
+  a `save()` call has to be a deliberate decision.
+- **`update` uses `existsByIsbnAndIdNot`, never `existsByIsbn`.** The plain check would match the book
+  being edited and make it permanently un-editable — a bug that only appears when you re-save a book
+  without changing its ISBN.
+- **An unknown `authorId` throws instead of silently saving `null`.**
+- **A duplicate username is rejected before `passwordEncoder.encode` is ever called** — no point paying
+  100 ms of BCrypt to then throw it away.
+- **The plaintext password never reaches the saved entity.**
+- **Failed login issues no token:** `verify(jwtUtil, never()).generate(any())`.
+
+### Proving the tests have teeth
+
+A green suite proves nothing on its own. Changing one character in the stock check —
+`book.getStock() < quantity` to `< 0` — produces:
+
+```
+[ERROR] BookServiceImplTest.refusesOverselling <<< FAILURE!
+[ERROR] Tests run: 15, Failures: 1
+[INFO] BUILD FAILURE
+```
+
+The assignment's Definition of Done asks that broken logic fail a test. This is that, demonstrated
+rather than claimed.
+
+### What unit tests cannot do
+
+A mock will happily agree with a query that PostgreSQL would reject. These tests say nothing about
+whether the SQL is valid, whether the entity mapping matches the schema, or whether the transaction
+commits. That is what 4b and 4c are for.
+
+## 4b–4c — still to do
+
+`@DataJpaTest` and `@WebMvcTest` slices on Testcontainers · one full `@SpringBootTest` path · security
+tests asserting 401/403 · removing the need for a running PostgreSQL before `./mvnw test`.
