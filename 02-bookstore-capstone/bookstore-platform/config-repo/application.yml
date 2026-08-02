@@ -57,6 +57,18 @@ spring:
             read-timeout: 3000       # ms to wait for a response once connected
             logger-level: basic
 
+  servlet:
+    multipart:
+      # Boot's defaults are 1MB per file and 10MB per request, which rejects most real cover images
+      # with a 500 that mentions neither the limit nor the file. Raised, and still bounded: an
+      # unbounded upload endpoint is a way to fill a disk from the internet.
+      #
+      # Platform-wide rather than book-service-only because a limit that differs between the gateway
+      # and the service behind it fails in the worse direction - the bytes are accepted at the edge,
+      # travel the network, and are then rejected.
+      max-file-size: 5MB
+      max-request-size: 6MB
+
   kafka:
     # Platform-wide, for the same reason the JWT signing key is: a producer and its consumers have to
     # agree on the broker and on the topic name, or nothing works and nothing says why. A consumer

@@ -598,3 +598,69 @@ GET {{gateway}}/api/books/me/history
 ###                                          delete anything, silently.
 ###   viewedAt ends in Z                     ISO-8601 UTC, so the sort key's string
 ###                                          order IS its chronological order.
+
+### ---------------------------------------------------------------------------
+### Step 9b — cover images on S3
+### ---------------------------------------------------------------------------
+###
+###   ./scripts/aws/s3-covers-bucket.sh      once; prints the bucket name
+###
+### The object key is DETERMINISTIC - covers/{bookId}, no UUID, no extension.
+### Everything in 9c rests on it: re-uploading replaces rather than accumulating,
+### and the Lambda derives its DynamoDB key from the same string, so a redelivered
+### event and a genuine re-upload both write one row rather than two.
+
+### 49. Upload a cover. ADMIN only. 204, not 201 - the URL is unchanged, and a
+### second upload replaces rather than creating something at a new address.
+POST {{gateway}}/api/books/2/cover
+Authorization: Bearer {{adminToken}}
+Content-Type: multipart/form-data; boundary=----Boundary
+
+------Boundary
+Content-Disposition: form-data; name="file"; filename="cover.png"
+Content-Type: image/png
+
+< ./cover.png
+------Boundary--
+
+### 50. A USER may not. Same path, different method, different rule - which is why
+### the security config matches on method rather than on path alone.
+POST {{gateway}}/api/books/2/cover
+Authorization: Bearer {{gwToken}}
+Content-Type: multipart/form-data; boundary=----Boundary
+
+------Boundary
+Content-Disposition: form-data; name="file"; filename="cover.png"
+Content-Type: image/png
+
+< ./cover.png
+------Boundary--
+
+### 51. Reading a cover is PUBLIC, and answers 302 rather than streaming the image.
+### The redirect costs a locally-computed signature - presigning makes NO call to
+### AWS - and S3 then serves the bytes without a Java thread held for the transfer.
+GET {{gateway}}/api/books/2/cover
+
+### 52. A book with no cover -> 404 from this service, rather than a redirect to a
+### URL that will 404 from S3. One is "no cover"; the other looks like a broken
+### integration.
+GET {{gateway}}/api/books/3/cover
+
+###
+### Status codes worth checking, all of which were wrong at least once:
+###
+###   a text/plain file      400   (was 500 until the IllegalArgumentException was mapped -
+###                                 a 500 is the server claiming a bug it does not have)
+###   a 6MB file, limit 5MB  413   (not 400: the request was well formed, just too big)
+###   cover for book 9999    404   (checked BEFORE the put, so no orphaned object)
+###   a real PNG             204
+###
+### And what the API cannot show you:
+###
+###   aws s3api head-object --bucket <bucket> --key covers/2
+###     ContentType image/png, Metadata {"book-id": "2"} - the object is self-describing
+###
+###   aws s3api list-objects-v2   --bucket <bucket> --prefix covers/  -> 1 object
+###   aws s3api list-object-versions --bucket <bucket> --prefix covers/2 -> 2 versions
+###     one object, two versions: the deterministic key REPLACED in place, and the
+###     previous cover is still recoverable because the bucket is versioned.

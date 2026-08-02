@@ -7,3 +7,11 @@ spring:
     password: bookdb
   flyway:
     locations: classpath:db/migration,classpath:db/seed
+
+app:
+  aws:
+    s3:
+      # Account-specific, because S3 bucket names are globally unique across every AWS account on
+      # earth - so unlike a DynamoDB table name this cannot be a constant in the shared file. Printed
+      # by scripts/aws/s3-covers-bucket.sh.
+      covers-bucket: bookstore-covers-018733

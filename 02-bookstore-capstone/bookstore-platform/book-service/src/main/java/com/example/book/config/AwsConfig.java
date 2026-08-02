@@ -7,6 +7,8 @@ import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClientBuilder;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 
 import java.net.URI;
 
@@ -48,5 +50,27 @@ public class AwsConfig {
         }
 
         return builder.build();
+    }
+
+    @Bean
+    public S3Client s3Client(@Value("${app.aws.region}") String region) {
+        return S3Client.builder()
+                .region(Region.of(region))
+                .credentialsProvider(DefaultCredentialsProvider.create())
+                .build();
+    }
+
+    /**
+     * Signs URLs. Deliberately a separate bean from {@link S3Client}, because it is a different kind
+     * of thing: presigning makes <em>no network call at all</em> - it is an HMAC over a canonical
+     * request, computed locally. That is what makes redirecting to a presigned URL cheap enough to do
+     * on every cover request, and why this service can hand out URLs for a bucket it never reads.
+     */
+    @Bean
+    public S3Presigner s3Presigner(@Value("${app.aws.region}") String region) {
+        return S3Presigner.builder()
+                .region(Region.of(region))
+                .credentialsProvider(DefaultCredentialsProvider.create())
+                .build();
     }
 }

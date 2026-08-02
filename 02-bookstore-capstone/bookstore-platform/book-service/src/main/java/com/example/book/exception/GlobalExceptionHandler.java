@@ -118,6 +118,39 @@ public class GlobalExceptionHandler {
      * Last resort. Logs the full stack trace server-side but returns a generic message, so internal
      * details never reach the client.
      */
+    /**
+     * A rejected upload is the CALLER's mistake, so it is a 400. Added in Step 9b because it was not:
+     * posting a text file as a cover produced a 500, which is the server admitting to a bug it does not
+     * have and sending whoever reads the log to debug the wrong thing entirely (the same reasoning as
+     * 5b's FeignException mapping - a wrong status code costs someone an afternoon).
+     */
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<ErrorResponse> handleIllegalArgument(
+            IllegalArgumentException ex, HttpServletRequest request) {
+        log.warn("Rejected request to {}: {}", request.getRequestURI(), ex.getMessage());
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(ErrorResponse.of(400, "Bad Request", ex.getMessage(), request.getRequestURI()));
+    }
+
+    /**
+     * 413, not 500 and not 400.
+     *
+     * <p>The distinction is worth making: a 400 says "your request was malformed", and this request was
+     * perfectly well formed - it was simply too big. 413 tells a client something it can act on, which
+     * is the whole job of a status code. Without this handler Spring's MaxUploadSizeExceededException
+     * reaches the catch-all below and a 5MB limit looks like an outage.
+     */
+    @ExceptionHandler(org.springframework.web.multipart.MaxUploadSizeExceededException.class)
+    public ResponseEntity<ErrorResponse> handleTooLarge(
+            org.springframework.web.multipart.MaxUploadSizeExceededException ex,
+            HttpServletRequest request) {
+        log.warn("Upload to {} exceeded the configured limit", request.getRequestURI());
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
+                .body(ErrorResponse.of(413, "Payload Too Large",
+                        "The uploaded file is larger than this endpoint accepts",
+                        request.getRequestURI()));
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleUnexpected(Exception ex, HttpServletRequest request) {
         log.error("Unhandled exception on {} {}", request.getMethod(), request.getRequestURI(), ex);

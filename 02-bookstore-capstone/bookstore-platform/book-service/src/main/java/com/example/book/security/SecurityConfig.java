@@ -72,6 +72,13 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.GET, "/api/books/me/history")
                             .hasAnyRole("USER", "ADMIN")
 
+                        // Reading a cover is public; replacing one is not. Both are the same path
+                        // with different methods, which is exactly the case a path-only rule gets
+                        // wrong - and "/api/books/*" would not have covered either of them anyway,
+                        // since a single * does not cross a /.
+                        .requestMatchers(HttpMethod.GET, "/api/books/*/cover").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/books/*/cover").hasRole("ADMIN")
+
                         .requestMatchers(HttpMethod.GET, "/api/books", "/api/books/*", "/api/authors")
                             .permitAll()
 

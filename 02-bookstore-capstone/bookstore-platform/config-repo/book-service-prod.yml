@@ -7,3 +7,11 @@ spring:
     password: ${DB_PASSWORD}
   flyway:
     locations: classpath:db/migration
+
+app:
+  aws:
+    s3:
+      # A different bucket per environment, from the environment. Sharing one between dev and prod
+      # would mean a test upload replacing a production cover - the object key is deterministic, so
+      # they would collide exactly.
+      covers-bucket: ${COVERS_BUCKET}

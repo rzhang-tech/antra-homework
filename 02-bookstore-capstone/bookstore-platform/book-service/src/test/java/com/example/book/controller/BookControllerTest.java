@@ -75,6 +75,7 @@ class BookControllerTest {
     // named here - which is the slice doing its job: adding a dependency to a controller is a change
     // to its contract with the layer below, and this test failing is that change being noticed.
     @MockitoBean private com.example.book.service.BrowsingHistoryService browsingHistory;
+    @MockitoBean private com.example.book.service.CoverStorageService coverStorage;
 
     /*
      * SecurityConfig also declares the AuthenticationManager, which needs a UserDetailsService and a

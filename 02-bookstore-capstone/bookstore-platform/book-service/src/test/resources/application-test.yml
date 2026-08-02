@@ -36,6 +36,10 @@ app:
     # duplicate top-level keys and SnakeYAML refuses the document outright - which at least fails
     # loudly, unlike most of this step's traps.
     region: us-east-1
+    s3:
+      covers-bucket: covers-test
+      presign-ttl: PT5M
+
     dynamodb:
       browsing-history-table: UserBrowsingHistory-test
       endpoint: ""

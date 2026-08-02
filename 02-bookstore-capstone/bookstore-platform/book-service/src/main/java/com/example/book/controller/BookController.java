@@ -8,6 +8,12 @@ import com.example.book.dto.PurchaseRequestDto;
 import com.example.book.security.AuthenticatedUser;
 import com.example.book.service.BookService;
 import com.example.book.service.BrowsingHistoryService;
+import com.example.book.service.CoverStorageService;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.bind.annotation.RequestPart;
+
+import java.io.IOException;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -47,6 +53,7 @@ public class BookController {
 
     private final BookService bookService;
     private final BrowsingHistoryService browsingHistory;
+    private final CoverStorageService coverStorage;
 
     /** List or keyword-search books. Paging: {@code ?page=0&size=20&sort=title,asc}. */
     @GetMapping
@@ -74,6 +81,39 @@ public class BookController {
         BookResponseDto book = bookService.findById(id);
         browsingHistory.recordView(viewer, id, book.title());
         return book;
+    }
+
+    /**
+     * Uploads or replaces a book's cover. ADMIN only.
+     *
+     * <p>The bytes stream through this service rather than going straight to S3 with a presigned PUT,
+     * because they have to be checked before they are accepted - role, content type, size. A presigned
+     * PUT is the scalable shape and it hands the client a URL that bypasses all three.
+     *
+     * <p>Returns 204 rather than 201: the resource is the book's cover, its URL is unchanged
+     * ({@code covers/{bookId}} is deterministic), and a second upload replaces rather than creates.
+     * Answering 201 with a Location would imply something new exists at a new address.
+     */
+    @PostMapping("/{id}/cover")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void uploadCover(@PathVariable Long id,
+                            @RequestPart("file") MultipartFile file) throws IOException {
+        coverStorage.upload(id, file);
+    }
+
+    /**
+     * Redirects to a short-lived S3 URL. Public.
+     *
+     * <p>302 rather than streaming the image through this service: a redirect costs a locally-computed
+     * signature, and S3 then serves the megabytes without a Java thread being held for the transfer.
+     * Streaming would make the most-requested, least-interesting endpoint on the platform the one that
+     * consumes its bandwidth.
+     */
+    @GetMapping("/{id}/cover")
+    public ResponseEntity<Void> cover(@PathVariable Long id) {
+        return ResponseEntity.status(HttpStatus.FOUND)
+                .location(URI.create(coverStorage.presignedUrl(id).toString()))
+                .build();
     }
 
     /**

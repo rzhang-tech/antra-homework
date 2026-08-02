@@ -10,6 +10,15 @@ app:
     # from a Lambda that has no Spring context at all, and one SDK across both is one thing to know.
     region: us-east-1
 
+    s3:
+      # The BUCKET NAME is deliberately not here - it is per-profile (see book-service-dev.yml),
+      # because S3 bucket names are globally unique across all of AWS and therefore account-specific.
+      #
+      # How long a presigned cover URL stays valid. Short, because a presigned URL works for anyone
+      # holding it until it expires - a browser needs seconds, a leaked link should not outlive the
+      # page it came from. Long enough that a slow mobile connection still finishes the fetch.
+      presign-ttl: PT5M
+
     dynamodb:
       browsing-history-table: UserBrowsingHistory
 

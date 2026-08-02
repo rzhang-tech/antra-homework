@@ -93,6 +93,16 @@ public class EdgeAuthenticationFilter implements GlobalFilter, Ordered {
             new PublicRoute(HttpMethod.POST, "/api/auth/login"),
             new PublicRoute(HttpMethod.GET, "/api/books"),
             new PublicRoute(HttpMethod.GET, "/api/books/*"),
+            // Added in Step 9b, one step after the risk above was written down - and in the direction
+            // that comment did NOT cover. It predicted a service CLOSING a route while the edge stayed
+            // open, and called that safe because the service is the authority. What actually happened
+            // was a service OPENING one: book-service made cover retrieval public, this list did not
+            // know, and the front door answered 401 to an endpoint the service was happy to serve.
+            //
+            // Not a security failure - a functionality failure, which is the other half of the same
+            // duplication. Worth stating that the safe direction is only safe for security: an edge
+            // that is stricter than the services it fronts is an edge that makes them unreachable.
+            new PublicRoute(HttpMethod.GET, "/api/books/*/cover"),
             new PublicRoute(HttpMethod.GET, "/api/authors"));
 
     @Override
