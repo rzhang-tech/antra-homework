@@ -17,4 +17,13 @@ public interface OrderService {
     OrderResponseDto findById(AuthenticatedUser caller, Long id);
 
     OrderResponseDto cancel(AuthenticatedUser caller, Long id);
+
+    /**
+     * Records that an order has been paid for.
+     *
+     * <p>Called by payment-service once money has changed hands. Idempotent: an order already PAID is
+     * returned unchanged rather than rejected, because the caller retrying is the intended behaviour —
+     * see the roll-forward note in {@code PaymentServiceImpl}.
+     */
+    OrderResponseDto markPaid(AuthenticatedUser caller, Long id);
 }

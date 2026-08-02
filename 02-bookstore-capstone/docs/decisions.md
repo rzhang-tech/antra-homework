@@ -283,6 +283,52 @@ a breaker that counts 404s as failures opens under entirely healthy traffic.
 
 ---
 
+## D15 — Sagas point whichever way is cheaper to reverse
+
+**Decision.** Placing an order unwinds on failure; paying for one rolls forward. Same mechanism —
+durable state, a scheduled recovery job, idempotent steps — in opposite directions.
+
+**Why.** Reversing a stock reservation is a release call: cheap, invisible to the customer, leaving no
+trace. Reversing a charge is a refund: slow, visible, and in a real system it costs money. So when the
+last step of an order fails, undo; when the last step of a payment fails, keep trying to finish.
+
+**The consequence in code.** `pay` returns *success* when the charge worked but telling order-service
+did not. Reporting an error would tell a customer their payment failed when it succeeded, and invite
+them to pay twice. `PaymentRecoveryJob` therefore has no attempt limit — there is no acceptable resting
+state for "customer charged, order unaware", and marking it resolved after N attempts would amount to
+quietly deciding to keep the money.
+
+**Which direction to point is a business question, not a technical one.** The pattern supports both
+equally; only the cost of reversing each step decides.
+
+---
+
+## D16 — Background work needs its own identity
+
+**Decision.** Outgoing calls forward the caller's token when there is a request in flight, and use a
+short-lived service token minted by `ServiceTokenProvider` when there is not.
+
+**Why.** `PaymentRecoveryJob` runs on a timer, long after the customer has gone. The first version had
+nothing to forward and called order-service anonymously — 401 on every attempt, a recovery mechanism
+that could never recover anything, failing quietly. **Identity propagation covers synchronous work
+only**; a scheduled job, a Kafka consumer (Step 7), or any retry after the caller has left needs an
+identity of its own.
+
+**The tension with D12's neighbour.** Step 5a deleted `JwtUtil.generate` from book-service, arguing that
+two services able to mint credentials is two places to audit. That argument still holds. The difference
+is that book-service only ever acts for a caller who is present, while payment-service must act
+autonomously to complete a saga — and a service that acts on its own behalf cannot borrow someone
+else's identity to do it.
+
+**Bounded by:** minted per call, two-minute lifetime, never stored, used only when no request is in
+flight, and identifiable as `service:payment-service` in an audit log.
+
+**Not bounded enough:** the role is `ADMIN`, which is more authority than one endpoint needs. A distinct
+`SERVICE` role scoped to that route, or mTLS against an internal-only endpoint with no bearer token at
+all, is the real answer — both need the gateway from Step 8 to separate inside from outside.
+
+---
+
 ## D5 — Cross-service references are plain IDs, not foreign keys
 
 **Decision.** `order_item.book_id` and `orders.user_id` are plain `BIGINT` columns with no FK constraint.

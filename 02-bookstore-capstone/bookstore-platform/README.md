@@ -13,7 +13,7 @@ git checkout step-4-monolith
 | `user-service` | 8081 | `userdb` on 5433 | ☑ 5a |
 | `book-service` | 8082 | `bookdb` on 5434 | ☑ 5a |
 | `order-service` | 8083 | `orderdb` on 5435 | ☑ 5b |
-| `payment-service` | 8084 | `paymentdb` | 5d |
+| `payment-service` | 8084 | `paymentdb` on 5436 | ☑ 5e |
 
 ## Run it
 
@@ -21,7 +21,7 @@ git checkout step-4-monolith
 docker compose up -d
 ```
 
-(from `02-bookstore-capstone/` — starts **three** PostgreSQL instances)
+(from `02-bookstore-capstone/` — starts **four** PostgreSQL instances)
 
 ```bash
 cd user-service && ../mvnw spring-boot:run
@@ -35,6 +35,10 @@ cd book-service && ../mvnw spring-boot:run
 cd order-service && ../mvnw spring-boot:run
 ```
 
+```bash
+cd payment-service && ../mvnw spring-boot:run
+```
+
 Then work through [test-platform.http](test-platform.http), which exercises the boundary itself: a token
 minted on 8081, accepted on 8082.
 
@@ -44,7 +48,7 @@ Everything at once:
 ./mvnw test
 ```
 
-82 tests across the three services. Testcontainers supplies the databases, so nothing needs to be running.
+94 tests across the four services. Testcontainers supplies the databases, so nothing needs to be running.
 
 ---
 
@@ -398,14 +402,7 @@ Two ordering decisions inside it:
   reservation took effect. Unwinding requires no such knowledge: releasing a reservation that was never
   made is a no-op. In recovery code, prefer the direction that needs less information.
 
-## What is deliberately still missing
-
-`payment-service` is not built. Step 5's service list is therefore incomplete, and this is called out
-rather than glossed: the remaining work is a fourth service that pays for an `AWAITING_PAYMENT` order
-and moves it to `PAID` — the same patterns as above with an idempotency key on `order_id`, which the
-schema in the brief already anticipates with its `UNIQUE` constraint.
-
-Also honestly outstanding:
+## Still outstanding after 5d
 
 - **Compensation is at-least-once, not exactly-once in the face of everything.** If book-service is down
   for longer than the recovery job's patience, stock stays held until it comes back. The job keeps
@@ -414,6 +411,91 @@ Also honestly outstanding:
   here because releasing twice is a no-op, but a shared lock or a single scheduled leader is the real
   answer, and Step 10 is where that becomes unavoidable.
 
-## Next
+---
 
-`payment-service`, then Step 6's config server.
+# Step 5e — payment-service, and a saga that rolls forward
+
+The fourth service, and the one whose mistakes involve somebody's money. That changes the answer to the
+question 5d spent its time on.
+
+## Same pattern, opposite direction
+
+| | placing an order (5d) | paying for one (5e) |
+|---|---|---|
+| Step that can fail after a commit elsewhere | reserving stock | telling order-service |
+| Cost of reversing it | a release call; invisible | a refund; slow, visible, chargeable |
+| **So the saga** | **unwinds** | **rolls forward** |
+
+`OrderRecoveryJob` cancels stranded orders. `PaymentRecoveryJob` *completes* stranded payments, and
+never gives up:
+
+```java
+// No backoff limit and no giving up. There is no acceptable resting state for "customer charged,
+// order unaware" — marking it resolved after N attempts would mean quietly deciding to keep the money.
+```
+
+**Which direction a saga points is a business decision about the cost of reversing each step, not a
+property of the pattern.** The code shape is identical.
+
+## Idempotency by natural key
+
+Stock reservation needed a caller-supplied id, because "have I reserved this before?" has no natural
+answer. Payment does: **one payment per order**, true regardless of who asks or how often. So the key is
+`order_id UNIQUE`, and a caller cannot forget to send it the way it could forget a synthetic key.
+
+Every duplicate route ends at that constraint — a lost response, a double-submitted form, a proxy
+replay, two concurrent requests. Measured: paying three times produced one row and returned the same
+payment each time.
+
+## The failure that must not look like a failure
+
+If the charge succeeds and telling order-service fails, `pay` still returns **success**. Returning an
+error would tell a customer their payment did not work when it did, and invite them to pay again. The
+payment is flagged un-notified and the recovery job finishes it.
+
+Demonstrated by forcing exactly that state and watching it heal:
+
+```
+Payment recovery: 1 successful payment(s) order-service has not been told about
+Payment recovery: order 12 marked paid from payment 3
+```
+
+## Two bugs worth the whole step
+
+**1. A background job has no token to forward.**
+
+`FeignAuthPropagation` reads the caller's token off the current request. `PaymentRecoveryJob` runs on a
+timer, minutes after the customer left — no request, no token, so it called order-service anonymously and
+got **401 on every attempt**. A recovery mechanism that could never recover anything, failing quietly in
+a log nobody reads.
+
+**Identity propagation covers synchronous work only.** Anything asynchronous — a scheduled job, a queue
+consumer (Step 7), a retry after the caller has gone — needs an identity of its own.
+
+`ServiceTokenProvider` mints one, and this is uncomfortable: Step 5a deleted `generate()` from
+book-service arguing that two services able to mint credentials is two places to audit. The argument
+still holds; the situation differs. book-service only ever acts for a caller who is present.
+payment-service must act autonomously to finish a saga, and a service that acts on its own needs an
+identity of its own.
+
+What limits it: minted per call, two-minute lifetime, never stored, used only when no request is in
+flight, and identifiable as `service:payment-service` in any log. What does not: the role is `ADMIN`,
+which is more than the job needs. A distinct `SERVICE` role scoped to one route, or mTLS on an
+internal-only endpoint, is the real answer — both Step 8 territory, once a gateway separates inside from
+outside.
+
+**2. The idempotent fast path skipped an authorization check.**
+
+`pay` returns early when a payment already exists. That path did not check ownership, on the reasoning
+that ownership is checked after reading the order — which it is, on the path that reads the order. So
+once an order had been paid for, **any authenticated user** asking to pay for it got 201 and the payment
+details back: amount, timestamp, and confirmation the order existed.
+
+Every test of the slow path still passed. The shape generalises: **a fast path added for performance or
+idempotency is a second code path, and it needs every check the first one has.**
+
+## Next — Step 6
+
+Four services now share a signing key as four copies of one literal, and each carries its own database
+URL, timeouts and resilience thresholds. Changing any of them means editing four files and restarting
+four services. Spring Cloud Config Server.

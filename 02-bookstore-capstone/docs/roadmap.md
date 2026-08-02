@@ -11,8 +11,8 @@ Legend: ☐ not started · ◐ in progress · ☑ done
 | 2 | Real data layer: PostgreSQL, indexes, transactions, N+1 fix | Spring Data JPA, Flyway, PostgreSQL, `@Version` | ☑ |
 | 3 | Auth & security: register/login, JWT, USER/ADMIN roles | Spring Security, JJWT, BCrypt | ☑ |
 | 4 | Testing: unit, web slice, repo slice, integration | JUnit 5, Mockito, Testcontainers | ☑ |
-| 5 | Split into microservices, each with its own DB | OpenFeign, Resilience4j | ◐ 5a-5d done; payment-service outstanding |
-| 6 | Central configuration | Spring Cloud Config Server | ☐ |
+| 5 | Split into microservices, each with its own DB | OpenFeign, Resilience4j | ☑ |
+| 6 | Central configuration | Spring Cloud Config Server | ◐ |
 | 7 | Async messaging | Kafka, `@KafkaListener`, DLT | ☐ |
 | 8 | Single front door | Spring Cloud Gateway | ☐ |
 | 9 | Serverless file processing + browsing history | S3, Lambda, DynamoDB, SES/SNS | ☐ |

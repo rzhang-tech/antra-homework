@@ -193,6 +193,33 @@ public class OrderServiceImpl implements OrderService {
         return OrderResponseDto.from(orderTransactions.markCancelled(id));
     }
 
+    /**
+     * Moves an order to PAID.
+     *
+     * <p>Deliberately tolerant of being called twice. payment-service retries this until it succeeds,
+     * because once money has been taken the right move is to finish the order rather than unwind it —
+     * so a second call must be a no-op, not a 409.
+     *
+     * <p>It is not tolerant of being called on an order that never reached AWAITING_PAYMENT. Marking a
+     * PENDING order paid would mean recording money against an order whose stock was never confirmed.
+     */
+    @Override
+    public OrderResponseDto markPaid(AuthenticatedUser caller, Long id) {
+        Order order = orderRepository.findWithItemsById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Order not found with id " + id));
+        requireVisibleTo(caller, order);
+
+        if (order.getStatus() == OrderStatus.PAID) {
+            return OrderResponseDto.from(order);
+        }
+        if (order.getStatus() != OrderStatus.AWAITING_PAYMENT) {
+            throw new OrderNotAllowedException(
+                    "Order " + id + " is " + order.getStatus() + " and cannot be marked paid");
+        }
+
+        return OrderResponseDto.from(orderTransactions.markPaid(id));
+    }
+
     private void requireVisibleTo(AuthenticatedUser caller, Order order) {
         boolean isOwner = order.getUserId().equals(caller.id());
         boolean isAdmin = "ADMIN".equals(caller.role());

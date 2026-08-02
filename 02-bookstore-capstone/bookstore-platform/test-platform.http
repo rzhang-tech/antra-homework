@@ -261,3 +261,70 @@ Authorization: Bearer {{userToken}}
 ###     between leaves an order that is still cancellable.
 PUT {{orderService}}/api/orders/9/cancel
 Authorization: Bearer {{userToken}}
+
+### ---------------------------------------------------------------------------
+### payment-service (8084) — Step 5e
+### ---------------------------------------------------------------------------
+
+@paymentService = http://localhost:8084
+
+### 33. Pay for an AWAITING_PAYMENT order -> 201.
+###     payment-service reads the order from order-service (forwarding your
+###     token), charges, records, and then tells order-service it was paid.
+POST {{paymentService}}/api/payments
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "orderId": 10 }
+
+### 34. Pay again. Same payment id, no second charge — order_id is UNIQUE, and
+###     that constraint is the whole duplicate-charge defence.
+POST {{paymentService}}/api/payments
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "orderId": 10 }
+
+### 35. The order is now PAID
+GET {{orderService}}/api/orders/10
+Authorization: Bearer {{userToken}}
+
+### 36. Payment status for an order
+GET {{paymentService}}/api/payments/10
+Authorization: Bearer {{userToken}}
+
+### 37. An order that is not awaiting payment -> 409
+POST {{paymentService}}/api/payments
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "orderId": 10 }
+
+### 38. A simulated decline. Order a book priced so the total ends in .13 and pay
+###     for it -> 409, and the FAILED attempt is still recorded.
+POST {{paymentService}}/api/payments
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "orderId": 11 }
+
+### ---------------------------------------------------------------------------
+### 39. THE ROLL-FORWARD DEMO.
+###
+### Pay for an order, then simulate the crash where the money moved but the
+### notification never landed:
+###
+###   docker exec bookstore-payment-db psql -U paymentdb -d paymentdb \
+###     -c "UPDATE payment SET order_notified=FALSE WHERE order_id=12"
+###   docker exec bookstore-order-db psql -U orderdb -d orderdb \
+###     -c "UPDATE orders SET status='AWAITING_PAYMENT' WHERE id=12"
+###
+### Then watch this endpoint. Within 30 seconds PaymentRecoveryJob notices and
+### completes the saga — it does not refund, because unwinding a charge costs
+### more than finishing the order.
+### ---------------------------------------------------------------------------
+GET {{orderService}}/api/orders/12
+Authorization: Bearer {{userToken}}
+
+### 40. Circuit state for the order-service dependency
+GET {{paymentService}}/actuator/circuitbreakers

@@ -64,6 +64,20 @@ public class OrderController {
         return orderService.findById(caller, id);
     }
 
+    /**
+     * Marks an order paid. Called by payment-service, forwarding the customer's token.
+     *
+     * <p>Not a general-purpose endpoint — the ownership check in the service still applies, so a
+     * customer could in principle call it directly. That it is reachable at all is a consequence of
+     * having no service-to-service identity yet; Step 8's gateway is where such internal routes stop
+     * being exposed outside the cluster.
+     */
+    @PutMapping("/{id}/pay")
+    public OrderResponseDto markPaid(@AuthenticationPrincipal AuthenticatedUser caller,
+                                     @PathVariable Long id) {
+        return orderService.markPaid(caller, id);
+    }
+
     @PutMapping("/{id}/cancel")
     public OrderResponseDto cancel(@AuthenticationPrincipal AuthenticatedUser caller,
                                    @PathVariable Long id) {

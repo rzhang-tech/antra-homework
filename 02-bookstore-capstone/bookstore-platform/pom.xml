@@ -30,6 +30,7 @@
         <module>user-service</module>
         <module>book-service</module>
         <module>order-service</module>
+        <module>payment-service</module>
     </modules>
 
     <properties>

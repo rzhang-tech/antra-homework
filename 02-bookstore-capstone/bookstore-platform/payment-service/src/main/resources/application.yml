@@ -1,0 +1,62 @@
+spring:
+  application:
+    name: payment-service
+  profiles:
+    default: dev
+  jpa:
+    open-in-view: false
+
+server:
+  port: 8084
+  error:
+    include-stacktrace: never
+
+app:
+  jwt:
+    expiration-minutes: 60
+    issuer: bookstore
+  saga:
+    recovery-interval-ms: 30000
+
+resilience4j:
+  # Lower value = further out, so CircuitBreaker(Retry(call)). See order-service's config for the two
+  # bugs the default ordering caused there.
+  circuitbreaker:
+    circuit-breaker-aspect-order: 1
+    instances:
+      orders:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        register-health-indicator: true
+        # Business answers, not failures — counting them would open the circuit under healthy traffic.
+        ignore-exceptions:
+          - com.example.payment.exception.ResourceNotFoundException
+          - com.example.payment.exception.PaymentNotAllowedException
+  retry:
+    retry-aspect-order: 2
+    instances:
+      orders:
+        max-attempts: 3
+        wait-duration: 200ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        ignore-exceptions:
+          - com.example.payment.exception.ResourceNotFoundException
+          - com.example.payment.exception.PaymentNotAllowedException
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,circuitbreakers,circuitbreakerevents,metrics
+  endpoint:
+    health:
+      show-details: always
+  health:
+    circuitbreakers:
+      enabled: true

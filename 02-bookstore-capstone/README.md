@@ -17,7 +17,7 @@ technology enters.
 | 2 | PostgreSQL, indexes, transactions, N+1, optimistic locking | ☑ done |
 | 3 | Spring Security, JWT, USER/ADMIN roles | ☑ done |
 | 4 | Testing — 50 tests: unit, repository, web, integration | ☑ done |
-| 5 | Split into microservices | ◐ 5a-5d done — three services, Feign, circuit breaker, saga; payment-service outstanding |
+| 5 | Split into microservices | ☑ done — four services, Feign, circuit breaker, sagas both directions |
 | 6–11 | Config · Kafka · Gateway · AWS · K8s · CI/CD | planned |
 
 ## Layout
@@ -32,7 +32,8 @@ technology enters.
 ├── bookstore-platform/   # the services (Steps 5-11)
 │   ├── user-service/     # owns users; the only service that issues tokens
 │   ├── book-service/     # owns the catalog and stock; verifies tokens, never mints them
-│   └── order-service/    # owns orders; calls book-service over HTTP for price and stock
+│   ├── order-service/    # owns orders; calls book-service over HTTP for price and stock
+│   └── payment-service/  # owns payments; the saga that rolls forward rather than back
 ├── docker-compose.yml    # one PostgreSQL per service
 └── scripts/              # benchmark data, concurrency demo
 
@@ -75,7 +76,11 @@ cd bookstore-platform/book-service && ../mvnw spring-boot:run
 cd bookstore-platform/order-service && ../mvnw spring-boot:run
 ```
 
-user-service listens on 8081, book-service on 8082, order-service on 8083. See
+```bash
+cd bookstore-platform/payment-service && ../mvnw spring-boot:run
+```
+
+user-service listens on 8081, book-service on 8082, order-service on 8083, payment-service on 8084. See
 [bookstore-platform/test-platform.http](bookstore-platform/test-platform.http) for requests that cross
 the boundary.
 
