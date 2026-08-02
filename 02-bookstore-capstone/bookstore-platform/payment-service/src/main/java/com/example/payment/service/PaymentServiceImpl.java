@@ -6,6 +6,7 @@ import com.example.payment.dto.PaymentRequestDto;
 import com.example.payment.dto.PaymentResponseDto;
 import com.example.payment.entity.Payment;
 import com.example.payment.entity.PaymentStatus;
+import com.example.payment.event.PaymentEventPublisher;
 import com.example.payment.exception.PaymentNotAllowedException;
 import com.example.payment.exception.ResourceNotFoundException;
 import com.example.payment.repository.PaymentRepository;
@@ -26,6 +27,7 @@ public class PaymentServiceImpl implements PaymentService {
     private final PaymentRepository paymentRepository;
     private final PaymentTransactions paymentTransactions;
     private final OrderGateway orders;
+    private final PaymentEventPublisher events;
 
     /**
      * Pays for an order.
@@ -149,6 +151,10 @@ public class PaymentServiceImpl implements PaymentService {
         if (payment.isOrderNotified() || payment.getStatus() != PaymentStatus.SUCCESS) {
             return;
         }
+        // Step 7c. Announced here, on the one path that runs exactly once per successful payment -
+        // `orderNotified` already guards it, and it is the same flag the recovery job uses. Publishing
+        // from `pay` instead would fire again on every idempotent replay of an already-paid order.
+        events.paymentCompleted(payment);
         try {
             orders.markPaid(payment.getOrderId());
             paymentTransactions.markNotified(payment.getId());

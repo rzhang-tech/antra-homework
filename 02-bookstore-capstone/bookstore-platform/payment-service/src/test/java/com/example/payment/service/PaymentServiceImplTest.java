@@ -38,6 +38,8 @@ class PaymentServiceImplTest {
     @Mock private PaymentRepository paymentRepository;
     @Mock private PaymentTransactions paymentTransactions;
     @Mock private OrderGateway orders;
+    // Step 7c: a successful payment is announced. Mocked - what it publishes is its own test.
+    @Mock private com.example.payment.event.PaymentEventPublisher events;
 
     @InjectMocks private PaymentServiceImpl paymentService;
 

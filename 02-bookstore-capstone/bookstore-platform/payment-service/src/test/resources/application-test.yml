@@ -27,6 +27,10 @@ spring:
     locations: classpath:db/migration
 
 app:
+  kafka:
+    topics:
+      payment-completed: bookstore.payment.completed.test
+
   jwt:
     # Test-only, and irrelevant beyond satisfying the length constraint — nothing signed here outlives
     # the test JVM.

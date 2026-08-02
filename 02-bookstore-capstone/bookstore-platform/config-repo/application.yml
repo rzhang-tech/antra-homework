@@ -126,6 +126,7 @@ app:
       # Named after the fact, not after the service that happens to publish it today: `order.placed`
       # rather than `order-service-events`. A topic outlives the code that writes to it.
       order-placed: bookstore.order.placed
+      payment-completed: bookstore.payment.completed
 
   jwt:
     # These two were identical in four services because they describe the *token format*, and every

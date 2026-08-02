@@ -53,6 +53,12 @@ class OrderPlacedListenerTest {
         // Everything needed to count a sale travels in the message. That is why this service can be
         // written, deployed and restarted without order-service or book-service knowing it exists, and
         // why it keeps working when both are down.
+        //
+        // Asserted as a DELTA, and against this test's own book id. The tally is a singleton shared
+        // with every other test in this class - absolute assertions passed only in the order the tests
+        // happened to run first, which is the classic shared-fixture trap and worth not shipping.
+        BigDecimal revenueBefore = tally.currentRevenue();
+
         rawJson.send("bookstore.order.placed", "500", """
                 {
                   "orderId": 500,
@@ -66,10 +72,51 @@ class OrderPlacedListenerTest {
                 """);
 
         await().atMost(Duration.ofSeconds(20))
-                .untilAsserted(() -> assertThat(tally.ordersCounted()).isEqualTo(1));
+                .untilAsserted(() -> assertThat(tally.copiesSoldOf(11L)).isEqualTo(2));
 
-        assertThat(tally.currentRevenue()).isEqualByComparingTo(new BigDecimal("42.50"));
-        assertThat(tally.copiesSoldOf(11L)).isEqualTo(2);
+        assertThat(tally.currentRevenue().subtract(revenueBefore))
+                .isEqualByComparingTo(new BigDecimal("42.50"));
+    }
+
+
+    @Test
+    @DisplayName("a redelivered event is counted once, not twice")
+    void redeliveryDoesNotDoubleCount() {
+        // At-least-once is not a caveat in the documentation - it is the normal operating mode. A
+        // rebalance, a slow poll, a restarted pod or a producer retry all produce this exact message
+        // twice, and without a guard the second copy is indistinguishable from a second sale.
+        //
+        // Note what makes this the dangerous kind of bug: nothing errors, nothing is logged as wrong,
+        // and the resulting number looks exactly like a number. notification-service sending two
+        // emails is visible to the customer; revenue counted twice is visible to nobody.
+        String sameOrderTwice = """
+                {
+                  "orderId": 501,
+                  "userId": 3,
+                  "totalPrice": 30.00,
+                  "items": [
+                    {"bookId": 12, "title": "Effective Java", "quantity": 1, "unitPrice": 30.00}
+                  ],
+                  "placedAt": "2026-08-02T18:05:47.442536Z"
+                }
+                """;
+
+        BigDecimal revenueBefore = tally.currentRevenue();
+
+        rawJson.send("bookstore.order.placed", "501", sameOrderTwice);
+        rawJson.send("bookstore.order.placed", "501", sameOrderTwice);
+
+        await().atMost(Duration.ofSeconds(20))
+                .untilAsserted(() -> assertThat(tally.copiesSoldOf(12L)).isEqualTo(1));
+
+        // And it STAYS right. Asserting once the moment the count reaches 1 would pass without any
+        // guard at all, simply by reading the tally in the gap between the two deliveries.
+        await().during(Duration.ofSeconds(3)).atMost(Duration.ofSeconds(10))
+                .untilAsserted(() -> {
+                    assertThat(tally.copiesSoldOf(12L)).isEqualTo(1);
+                    assertThat(tally.currentRevenue().subtract(revenueBefore))
+                            .isEqualByComparingTo(new BigDecimal("30.00"));
+                });
     }
 
     /** See notification-service's copy: the application's own template would serialise this to a

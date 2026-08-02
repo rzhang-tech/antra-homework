@@ -1,6 +1,7 @@
 package com.example.analytics.service;
 
 import com.example.analytics.event.OrderPlaced;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -28,8 +29,11 @@ import java.util.concurrent.atomic.AtomicLong;
  * line printed twice.
  */
 @Service
+@RequiredArgsConstructor
 @Slf4j
 public class SalesTally {
+
+    private final ProcessedOrders processed;
 
     private final AtomicLong ordersCounted = new AtomicLong();
     private final Map<Long, Long> copiesSoldByBook = new ConcurrentHashMap<>();
@@ -44,7 +48,19 @@ public class SalesTally {
     private final Object lock = new Object();
     private BigDecimal revenue = BigDecimal.ZERO;
 
+    /**
+     * Counts a sale, once, however many times the message arrives.
+     *
+     * <p>The guard is here rather than in the listener on purpose. "Have I already counted this order?"
+     * is a question about the work, not about Kafka - and the same question would need answering if
+     * these events arrived over HTTP, or were replayed from a file during a migration. A listener that
+     * deduplicated would leave this method unsafe for every other caller.
+     */
     public void record(OrderPlaced event) {
+        if (!processed.firstTimeSeeing(event.orderId())) {
+            return;
+        }
+
         synchronized (lock) {
             revenue = revenue.add(event.totalPrice());
         }

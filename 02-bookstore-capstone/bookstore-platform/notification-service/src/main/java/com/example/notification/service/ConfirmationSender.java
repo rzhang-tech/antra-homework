@@ -1,6 +1,7 @@
 package com.example.notification.service;
 
 import com.example.notification.event.OrderPlaced;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -16,8 +17,11 @@ import org.springframework.stereotype.Service;
  * "have I already confirmed this order?" is a question about the work, not about Kafka.
  */
 @Service
+@RequiredArgsConstructor
 @Slf4j
 public class ConfirmationSender {
+
+    private final ProcessedOrders processed;
 
     /**
      * Sends the customer their order confirmation.
@@ -27,6 +31,13 @@ public class ConfirmationSender {
      * nothing upstream waited for it.
      */
     public void send(OrderPlaced event) {
+        // Step 7c. The guard lives here, not in the listener: "have I already confirmed this order?"
+        // is a question about the work, and it would need answering just the same if these events
+        // arrived over HTTP or were replayed from a file during a migration.
+        if (!processed.firstTimeSeeing(event.orderId())) {
+            return;
+        }
+
         log.info("CONFIRMATION to user {}: order {} accepted, {} item(s), total {} (placed {})",
                 event.userId(), event.orderId(), event.items().size(),
                 event.totalPrice(), event.placedAt());

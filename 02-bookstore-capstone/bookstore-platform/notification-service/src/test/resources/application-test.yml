@@ -29,6 +29,7 @@ app:
   kafka:
     topics:
       order-placed: bookstore.order.placed
+      payment-completed: bookstore.payment.completed
     groups:
       # A group name per test class would be tidier still, but this suite has one consumer and
       # @EmbeddedKafka starts a fresh broker per context - there are no offsets to collide with.
