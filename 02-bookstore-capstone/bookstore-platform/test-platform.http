@@ -9,6 +9,14 @@
 ### user-service on port 8081 being accepted by book-service on port 8082, without the two ever
 ### talking to each other.
 
+### FROM STEP 8, THE ONLY ADDRESS A CLIENT NEEDS IS THE GATEWAY.
+###
+### The per-service variables below still work and are kept deliberately: several requests at the end
+### of this file BYPASS the gateway on purpose, to demonstrate that the services do not trust anything
+### the gateway tells them. In a deployed platform 8081-8086 are not reachable from outside at all.
+
+@gateway = http://localhost:8080
+
 @userService = http://localhost:8081
 @bookService = http://localhost:8082
 
@@ -459,3 +467,86 @@ GET {{analytics}}/actuator/health
 ###   docker exec bookstore-kafka /opt/kafka/bin/kafka-console-consumer.sh \
 ###     --bootstrap-server localhost:9092 --from-beginning \
 ###     --topic bookstore.order.placed.notification-service.DLT
+
+### ---------------------------------------------------------------------------
+### Step 8 — the front door
+### ---------------------------------------------------------------------------
+###
+###   cd api-gateway && ../mvnw spring-boot:run      (8080 public, 9090 management)
+###
+### Everything above this line talks to a service directly, which is how the platform
+### looked before Step 8. Everything below goes through one address.
+
+### 33. Log in through the gateway. Public: registering and logging in cannot require
+### being logged in.
+# @name gatewayLogin
+POST {{gateway}}/api/auth/login
+Content-Type: application/json
+
+{ "username": "shopper", "password": "correct-horse-battery" }
+
+@gwToken = {{gatewayLogin.response.body.token}}
+
+### 34. Browsing the catalogue is public too - an anonymous visitor has to be able to
+### shop before deciding to register. No Authorization header at all.
+GET {{gateway}}/api/books
+
+### 35. A protected route with no token -> 401 AT THE EDGE. order-service never hears
+### about this request: it costs no connection, no thread and no database session.
+GET {{gateway}}/api/orders
+
+### 36. The same route with a real token -> 200, forwarded with the token untouched
+### plus X-Auth-User / X-Auth-User-Id / X-Auth-Role for downstream logs.
+GET {{gateway}}/api/orders
+Authorization: Bearer {{gwToken}}
+
+### 37. A whole purchase through one address.
+POST {{gateway}}/api/orders
+Content-Type: application/json
+Authorization: Bearer {{gwToken}}
+
+{ "items": [ { "bookId": 7, "quantity": 2 } ] }
+
+### 38. FORGING IDENTITY THROUGH THE GATEWAY -> 401. The gateway strips every inbound
+### X-Auth-* before it decides anything, and logs the attempt. Headers a proxy sets
+### must be headers a proxy also clears.
+GET {{gateway}}/api/orders
+X-Auth-User: admin
+X-Auth-User-Id: 1
+X-Auth-Role: ADMIN
+
+### 39. BYPASSING THE GATEWAY ENTIRELY -> still 401. This is the request that proves
+### the services do not trust the edge: they check the signature, so reaching a service
+### directly gains an attacker nothing. It is also why the token is forwarded rather
+### than replaced by a trusted header.
+DELETE {{bookService}}/api/books/1
+X-Auth-User: admin
+X-Auth-Role: ADMIN
+
+### 40. A CORS preflight to a PROTECTED route -> 200, not 401. A browser sends OPTIONS
+### with no Authorization header at all; refusing it would make the real request never
+### happen, and the console would say "CORS" with nothing mentioning a token.
+OPTIONS {{gateway}}/api/orders
+Origin: http://localhost:3000
+Access-Control-Request-Method: POST
+Access-Control-Request-Headers: authorization,content-type
+
+### 41. An origin nobody allowed -> 403.
+OPTIONS {{gateway}}/api/orders
+Origin: https://evil.example.com
+Access-Control-Request-Method: POST
+
+### 42. CORS IS NOT ACCESS CONTROL. This request carries no Origin header, so no CORS
+### check applies to it at all - and it still needs a valid token, which is the part
+### that actually protects anything.
+GET {{gateway}}/api/orders
+Authorization: Bearer {{gwToken}}
+
+### 43. /actuator/** IS NOT ROUTED. Every route starts /api, so there is no path from
+### the public port to any service's actuator - and none to the gateway's own either,
+### which is served on 9090. Expect 404.
+GET {{gateway}}/actuator/env
+
+### 44. The gateway's own actuator, on the management port. In Step 10 only 8080 is
+### named in the Service, so this is unreachable from outside the pod by construction.
+GET http://localhost:9090/actuator/gateway/routes

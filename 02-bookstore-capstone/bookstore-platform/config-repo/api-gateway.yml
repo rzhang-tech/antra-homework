@@ -50,6 +50,42 @@ spring:
           # notification-service and analytics-service appear nowhere in this file for a related
           # reason: they have no API. A route to them would be a route to nothing.
 
+          # CORS, configured once, here, and nowhere else (Step 8c).
+          #
+          # Before the gateway there was no sensible place for it: six services would have needed six
+          # identical blocks, and a browser calling two of them would have been at the mercy of
+          # whichever one was last edited. It belongs at the edge because it is a property OF the edge -
+          # "which web origins may a browser let talk to this API" is a question about the front door.
+          #
+          # WHAT CORS IS NOT: access control. It is a *browser* mechanism. curl ignores it entirely, and
+          # so does every server-side client, every script and every attacker. Removing an origin from
+          # the list below stops a page on that origin from reading responses in a browser; it stops
+          # nothing else. The authorization that matters is the token check in EdgeAuthenticationFilter
+          # and the rules inside each service. Treating a CORS list as a security boundary is one of the
+          # most common misreadings in web development.
+          globalcors:
+            cors-configurations:
+              '[/**]':
+                # Explicit origins, not `*`. `*` is tempting and works here only because this API
+                # authenticates with a bearer header rather than a cookie - the browser refuses to
+                # combine `*` with credentials at all. Naming them keeps the answer to "who is allowed
+                # to embed this API in a page" reviewable, and makes adding one a visible commit.
+                allowed-origins:
+                  - http://localhost:3000     # a local frontend, whenever there is one
+                  - http://localhost:5173
+                allowed-methods: [GET, POST, PUT, DELETE, OPTIONS]
+                # `Authorization` has to be listed. It is not a CORS-safelisted header, so without it
+                # every authenticated request from a browser fails the preflight - and the symptom is a
+                # console message about CORS rather than anything mentioning the token.
+                allowed-headers: [Authorization, Content-Type]
+                # False, deliberately. Cookies are not how this platform authenticates, and
+                # allow-credentials true is what makes a permissive origin list dangerous rather than
+                # merely untidy.
+                allow-credentials: false
+                # Cache the preflight for an hour, so a browser stops sending OPTIONS before every
+                # single request. Purely a latency setting; it changes nothing about what is allowed.
+                max-age: 3600
+
           httpclient:
             # The same reasoning as Step 5b's Feign timeouts, one layer further out. An unbounded
             # gateway is worse than an unbounded client: it holds the CUSTOMER's connection open too,
@@ -59,11 +95,33 @@ spring:
             response-timeout: 10s
 
 management:
+  # A SEPARATE PORT, and this one is a fix rather than a flourish.
+  #
+  # Every service got ADMIN-only actuator in Step 6c, enforced by its Spring Security filter chain.
+  # The gateway has no filter chain - EdgeAuthenticationFilter is a GlobalFilter, and a GlobalFilter
+  # runs only for requests the route table matched. /actuator is served by a different handler
+  # mapping, so the filter never saw it and `curl localhost:8080/actuator/env` returned 200 with the
+  # platform's configuration in it. On the one component facing the public internet.
+  #
+  # Two ways to fix that. Add spring-boot-starter-security here and rebuild the same ADMIN rule a
+  # fourth time - or stop serving actuator on the public port at all. The second is stronger: there
+  # is no rule to get wrong, no filter ordering to reason about, and in Step 10 only 8080 is named in
+  # the Service, so 9080 is unreachable from outside the pod by construction rather than by policy.
+  #
+  # Diagnostics stay available where diagnostics are done: kubectl port-forward, or localhost here.
+  server:
+    # 9090 rather than the more obvious 9080, which turned out to be taken by an unrelated program on
+    # the development machine. Worth a line because the failure was loud and specific - "Port 9080 was
+    # already in use", at startup, from the process that wanted it - which is exactly what a
+    # fail-fast configuration is supposed to do. Compare with the config-server outage in Step 6d,
+    # where a stale file silently supplied a fallback and nothing failed at all.
+    port: 9090
+
   endpoints:
     web:
       exposure:
         # `gateway` lists the live routes, which is the first thing to look at when a request lands
-        # somewhere unexpected. ADMIN-only, like every non-health endpoint since Step 6c.
+        # somewhere unexpected.
         include: health,info,refresh,env,loggers,metrics,gateway
   endpoint:
     health:

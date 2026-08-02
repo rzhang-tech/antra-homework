@@ -34,6 +34,19 @@ spring:
               uri: ${test.backend.url}
               predicates:
                 - Path=/api/orders/**
+          # The config-move rule again, fourth time. The real CORS block lives in the config repo;
+          # this stand-in exists so CorsTest can assert what Gateway DOES with one - in particular
+          # that a preflight to a protected route is answered rather than 401'd, which is a filter
+          # ORDERING property and cannot be checked by reading YAML.
+          globalcors:
+            cors-configurations:
+              '[/**]':
+                allowed-origins:
+                  - http://localhost:3000
+                allowed-methods: [GET, POST, PUT, DELETE, OPTIONS]
+                allowed-headers: [Authorization, Content-Type]
+                allow-credentials: false
+                max-age: 3600
 
 logging:
   level:

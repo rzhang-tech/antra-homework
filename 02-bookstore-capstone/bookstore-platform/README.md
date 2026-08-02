@@ -11,6 +11,7 @@ git checkout step-4-monolith
 | Service | Port | Database | State |
 |---------|------|----------|-------|
 | `config-server` | 8888 | none | ☑ 6a |
+| `api-gateway` | 8080 (9090 admin) | none | ☑ 8a |
 | `user-service` | 8081 | `userdb` on 5433 | ☑ 5a |
 | `book-service` | 8082 | `bookdb` on 5434 | ☑ 5a |
 | `order-service` | 8083 | `orderdb` on 5435 | ☑ 5b |
@@ -59,6 +60,12 @@ cd notification-service && ../mvnw spring-boot:run
 cd analytics-service && ../mvnw spring-boot:run
 ```
 
+And the front door, which from Step 8 is the only address a client needs:
+
+```bash
+cd api-gateway && ../mvnw spring-boot:run
+```
+
 Then work through [test-platform.http](test-platform.http), which exercises the boundary itself: a token
 minted on 8081, accepted on 8082.
 
@@ -68,7 +75,7 @@ Everything at once:
 ./mvnw test
 ```
 
-103 tests across the seven modules. Testcontainers supplies the databases, and no test talks to the
+122 tests across the eight modules. Testcontainers supplies the databases, and no test talks to the
 config server, so nothing needs to be running.
 
 Run `./mvnw clean` at least once after pulling Step 6: `target/classes` keeps a copy of every resource
@@ -1006,7 +1013,215 @@ alert on.
   null. Avro or JSON Schema with a registry is the industrial answer; the test that pins the wire format
   is this project's smaller one.
 
-## Next — Step 8
+---
 
-Five services with public APIs means five addresses, five places a token is validated, and five copies
-of "what is public". Spring Cloud Gateway.
+# Step 8 — one front door, and what must not be put behind it
+
+Seven services had, between them, six public addresses, four independent answers to "what is allowed
+without a token", and no shared place to configure CORS. A browser had to know all of it.
+
+There is now one address, `http://localhost:8080`, and the whole platform runs through it — login,
+browse, order, pay — with nothing calling 8081-8084 from outside.
+
+## What the gateway must never become
+
+A gateway is the easiest place on a platform to put things, and therefore the easiest to ruin. Three
+rules, written into `ApiGatewayApplication` so they survive the next person with a good idea:
+
+- **No business logic.** A rule here applies to every service by accident, cannot be tested with the
+  service it belongs to, and makes one deployable a dependency of all seven.
+- **No aggregation.** The tempting "one call that returns an order with its books and its payment"
+  makes the gateway a client of three services with three failure modes and three timeouts. That is a
+  backend-for-frontend, and it belongs in its own deployable if it is ever wanted.
+- **No stored state.** Everything it knows comes from the request or the config server, which is what
+  lets it scale to N instances that agree about nothing.
+
+What it legitimately owns — routing, edge authentication, CORS, later rate limiting and tracing — are
+all properties of *the edge* rather than of any service.
+
+## Routing
+
+Routes live in the config repo, because a route is configuration:
+
+```
+/api/auth/**, /api/users/**       -> user-service
+/api/books/**, /api/authors/**    -> book-service
+/api/orders/**                    -> order-service
+/api/payments/**                  -> payment-service
+```
+
+Paths are forwarded **unchanged** — no `StripPrefix`, no `RewritePath`. A client's URL and a service's
+URL being the same string means a stack trace, a log line and a curl command all refer to the same
+thing, and it means putting a service behind the gateway changed nothing for callers.
+
+**Order matters and nothing warns.** Predicates are evaluated top to bottom and the first match wins, so
+a broad path above a narrow one silently swallows it. `ConfigServerContractTest` asserts the indices as
+well as the contents for exactly that reason.
+
+**`/actuator/**` is not routed, and that is the point.** Since Step 5c several comments justified
+leaving `/actuator/circuitbreakers` open on the grounds that "the gateway never routes `/actuator/**`
+from outside". This is where the promise is kept: every route starts `/api`, so there is no path from
+8080 to any service's actuator. It needed no rule — only the absence of a catch-all.
+
+notification-service and analytics-service appear nowhere in the route table. They have no API; a route
+to them would be a route to nothing.
+
+## The gateway authenticates; the services authorize
+
+The edge checks that a token exists, is genuine and has not expired, then gets out of the way. It does
+not know that only an ADMIN may delete a book, or that a customer may read only their own orders, and it
+must not learn — **a rule stated in two places drifts, and the copy on the edge is the one nobody
+remembers to update.**
+
+What the coarse half buys, measured:
+
+```
+GET /api/orders, no token       401
+GET /api/orders, bad token      401
+
+order-service log lines produced by those two requests:   0
+order-service log lines produced by one accepted request: 28
+```
+
+A request with no token costs a service nothing — no connection, no thread, no database session. Under a
+credential-stuffing attempt that is the difference between an inconvenience and an outage.
+
+### Why the services still verify every token
+
+The tempting next step is to strip the token here, forward `X-Auth-User-Id`, and let the services trust
+it. Don't. Anything able to reach a service directly — another pod, a port-forward, a misconfigured
+NetworkPolicy — could then claim to be anybody, and the platform's whole authorization model would rest
+on network topology that nothing enforces. **A network boundary is not a security boundary until
+something makes it one** (mTLS, a service mesh, an authenticated internal identity), and this platform
+has none of those yet.
+
+So the token is forwarded untouched, and the identity headers are for logs and traces only.
+Demonstrated rather than argued:
+
+```
+forged X-Auth-Role: ADMIN through the gateway      401  (and the gateway logs the attempt)
+forged X-Auth-Role: ADMIN straight at 8083         401
+forged X-Auth-Role: ADMIN + DELETE /api/books/1    401
+```
+
+### Stripping inbound `X-Auth-*` is the most important line in the filter
+
+The moment any downstream code reads `X-Auth-Role` — and *"the gateway always sets it"* is exactly the
+reasoning that gets there — a curl command becomes a complete authentication bypass unless the header is
+cleared on the way in. **Headers a proxy sets must be headers a proxy also clears.** It is
+unconditional: on public routes, and on requests about to be refused, because the value of the
+guarantee comes entirely from having no exceptions to reason about.
+
+A genuine customer sending `X-Auth-Role: ADMIN` alongside a valid token is allowed through — and arrives
+describing the person the *token* says they are.
+
+### The one duplication Step 8 accepts
+
+The gateway's public-route list mirrors `permitAll` rules the services already have. If book-service
+later closes `GET /api/books` and nobody edits the list, the edge lets it through and the service
+refuses it. **That direction is safe** — the service is the authority and it says no. An edge that
+*granted* what a service denied would be a vulnerability; this is only a wasted hop.
+
+## CORS, once
+
+Before the gateway there was no sensible place for it: six services would have needed six identical
+blocks, and a browser calling two of them would have been at the mercy of whichever was edited last.
+
+```
+$ curl -i -X OPTIONS localhost:8080/api/orders \
+    -H 'Origin: http://localhost:3000' -H 'Access-Control-Request-Method: POST'
+
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: http://localhost:3000
+Access-Control-Allow-Headers: authorization, content-type
+Access-Control-Max-Age: 3600
+```
+
+**200, on a protected route, with no token** — and that is a filter *ordering* property, not a
+configuration one. A browser sends `OPTIONS` with no `Authorization` header at all; answering the
+preflight with 401 makes the real request never happen, and the developer sees a CORS error in the
+console with nothing anywhere mentioning a token. `EdgeAuthenticationFilter` runs at
+`HIGHEST_PRECEDENCE + 100` to leave room for it, and `CorsTest` pins the behaviour because YAML cannot.
+
+`Authorization` must be listed explicitly: it is not a CORS-safelisted header, so omitting it fails
+every authenticated browser request. Origins are named rather than `*`, and `allow-credentials` is
+false because this platform authenticates with a bearer header rather than a cookie.
+
+### CORS is not access control
+
+The most common misreading in web development, so it is pinned as an assertion:
+
+```
+valid token, no Origin header at all      200      <- curl is entirely unaffected
+valid token, disallowed Origin            403
+no token,   allowed Origin                401
+```
+
+CORS is a **browser** mechanism, and the check keys on the `Origin` header. Every server-side client,
+script and attacker simply omits it. Removing an origin from the list stops a *page* on that origin
+from reading responses in a browser; it stops nothing else. The authorization that matters is the token
+check at the edge and the rules inside each service.
+
+(Worth knowing: Spring rejects the *actual* cross-origin request too, not just the preflight. It is
+easy to assume CORS is preflight-only.)
+
+## A hole this step opened and closed
+
+`curl localhost:8080/actuator/env` returned **200, with the platform's configuration in it**, on the one
+component facing the public internet.
+
+Every service got ADMIN-only actuator in Step 6c, enforced by its Spring Security filter chain. The
+gateway has no filter chain: `EdgeAuthenticationFilter` is a `GlobalFilter`, and a `GlobalFilter` runs
+only for requests the route table matched. `/actuator` is served by a different handler mapping, so the
+filter never saw it.
+
+Two possible fixes — add a security starter and rebuild the same ADMIN rule a fourth time, or stop
+serving actuator on the public port at all. The second is stronger: no rule to get wrong, no filter
+ordering to reason about, and in Step 10 only 8080 is named in the Service, so the management port is
+unreachable from outside the pod *by construction* rather than by policy.
+
+```
+                          8080 (public)    9090 (management)
+/actuator/env                  404               200
+/actuator/health               404               200
+/actuator/gateway/routes       404               200
+/api/books                     200                 -
+```
+
+**The general shape is worth keeping.** A guard attached to one mechanism (the routing filter chain)
+does not protect what arrives through another (the actuator handler mapping). "Everything goes through
+the filter" was true of the requests anyone was thinking about.
+
+## Tested in two halves, on purpose
+
+The real route table and CORS block live in the config repo, and tests do not read the config server —
+the rule in [config-repo/README.md](config-repo/README.md), arriving for the fourth time:
+
+| | asserts |
+|---|---|
+| `RoutingTest`, `EdgeAuthenticationTest`, `CorsTest` | what Gateway **does** with a route table: forwards the path, keeps `Authorization`, 404s an unmatched path, refuses without a token, strips forged identity, answers a preflight — against WireMock, using a stand-in table |
+| `ConfigServerContractTest` | that the **real** table names the right services, paths and ports, in the right order |
+
+Without the second, renaming a path in the config repo would break every client and pass every test.
+
+`RoutingTest` had been sending `Bearer a.b.c` and getting 200. The moment the edge filter appeared, two
+of its tests failed — the filter proving it was in the request path rather than merely configured.
+
+## What got worse
+
+- **A single point of failure with a queue behind it.** Every request now depends on one more process.
+  Gateway being stateless makes it horizontally scalable, which is the answer, but Step 10 has to
+  actually run more than one.
+- **The public-route list is duplicated**, in the safe direction, and nothing checks that it still
+  matches the services' own rules.
+- **The gateway holds the signing key.** It only verifies, and it has no way to issue — no users table,
+  no password encoder, no login route — but it is now a component on the public edge that possesses a
+  credential. The real answer is asymmetric keys: user-service signs with a private key and everything
+  else verifies with a public one, so a compromised verifier cannot mint anything. That is a change to
+  every service, and it is the first thing on the Step 11 list.
+- **Nothing rate-limits.** The edge is the only place that could, and it does not.
+
+## Next — Step 9
+
+Cover images have to go somewhere, resizing them is bursty and stateless, and browsing history is a
+write-heavy single-key access pattern. S3, Lambda and DynamoDB.

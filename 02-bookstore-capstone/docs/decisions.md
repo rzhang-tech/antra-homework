@@ -501,6 +501,89 @@ topics, a human does.
 scheduled method rather than an alert with an owner. Step 11 replaces it with a real one.
 ---
 
+## D23 — The gateway authenticates; the services authorize; both verify
+
+**Decision.** The edge checks that a token exists, is genuine and is unexpired, and refuses anything
+else before routing. It knows no authorization rules. The token is forwarded untouched and every service
+verifies the signature exactly as it did before the gateway existed.
+
+**Why authenticate at the edge.** A request with no token, or a forged one, is refused in microseconds
+without costing any service a connection, a thread or a database session. Measured: two rejected
+requests produced **zero** log lines in order-service; one accepted request produced 28.
+
+**Why not authorize there.** A rule stated in two places drifts, and the copy on the edge is the one
+nobody updates when the service changes. The edge cannot answer "may this customer read this order?"
+without knowing whose order it is, which means either duplicating the domain or asking the service —
+and asking the service is what the service was going to do anyway.
+
+**Why the services still verify.** Because the alternative — strip the token, forward
+`X-Auth-User-Id`, trust it — puts the platform's entire authorization model on network topology that
+nothing enforces. Anything able to reach a service directly could claim to be anybody. **A network
+boundary is not a security boundary until something makes it one**, and this platform has no mTLS and no
+service mesh. Demonstrated: forged identity headers sent straight at order-service and at book-service
+both get 401, because a signature is what those services check.
+
+**The corollary that carries the risk:** headers a proxy sets must be headers a proxy also clears.
+Inbound `X-Auth-*` is stripped unconditionally — on public routes, and on requests about to be refused —
+because the value of that guarantee comes entirely from having no exceptions to reason about.
+
+**When the trusted-header design becomes correct:** with mTLS between the gateway and the services, or a
+service mesh enforcing identity, or a NetworkPolicy that genuinely makes the gateway the only reachable
+caller. It is a real design, and it needs a real boundary underneath it.
+
+---
+
+## D24 — CORS is a browser mechanism, configured once, and it is not access control
+
+**Decision.** One CORS configuration at the gateway, with named origins rather than `*`,
+`allow-credentials: false`, and `Authorization` explicitly allowed. No service configures CORS.
+
+**Why here.** "Which web origins may a browser let talk to this API" is a question about the front door.
+Six services would have needed six identical blocks, and a browser calling two of them would have been
+at the mercy of whichever was edited last.
+
+**The interaction that must be right.** A browser sends `OPTIONS` with **no `Authorization` header at
+all**. If the edge auth filter answered that preflight with 401, the real request would never be sent
+and the developer would see a CORS error in the console with nothing mentioning a token.
+`EdgeAuthenticationFilter` therefore runs at `HIGHEST_PRECEDENCE + 100`, leaving room for the CORS
+filter ahead of it. That is a filter *ordering* property and cannot be verified by reading YAML, so
+`CorsTest` asserts it with a request.
+
+**The misreading worth stating plainly.** CORS protects the *user's browser*, not the API. The check
+keys on the `Origin` header, and curl, every server-side client and every attacker simply omit it:
+
+```
+valid token, no Origin header       200      <- unaffected by CORS entirely
+valid token, disallowed Origin      403
+no token,   allowed Origin          401
+```
+
+Removing an origin stops a page on that origin reading responses in a browser. It stops nothing else.
+Treating an allow-list as a security boundary is one of the most common mistakes in web development.
+
+---
+
+## D25 — Actuator on a separate port, because a filter only guards what it sees
+
+**Decision.** The gateway serves its API on 8080 and its actuator on 9090, and only 8080 is public.
+
+**Why this exists.** `curl localhost:8080/actuator/env` returned 200, with the platform's configuration
+in it, on the component facing the public internet. Every *service* had ADMIN-only actuator from Step
+6c, enforced by its Spring Security filter chain; the gateway has no filter chain.
+`EdgeAuthenticationFilter` is a `GlobalFilter`, and a `GlobalFilter` runs only for requests the route
+table matched. `/actuator` is served by a different handler mapping, so the filter never saw it.
+
+**Why a separate port rather than a fourth copy of the ADMIN rule.** There is no rule to get wrong and
+no filter ordering to reason about, and in Step 10 only 8080 is named in the Service — so the management
+port is unreachable from outside the pod *by construction* rather than by policy. Diagnostics stay
+available where diagnostics are done: `kubectl port-forward`, or localhost.
+
+**The general lesson, which is bigger than the fix.** A guard attached to one mechanism does not protect
+what arrives through another. "Everything goes through the filter" was true of every request anyone was
+thinking about, and false for the one that mattered. When a guard is a filter, the question to ask is
+not "is it correct?" but "what reaches this process without passing through it?"
+---
+
 ## D5 — Cross-service references are plain IDs, not foreign keys
 
 **Decision.** `order_item.book_id` and `orders.user_id` are plain `BIGINT` columns with no FK constraint.
