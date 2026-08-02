@@ -55,6 +55,9 @@ class OrderServiceImplTest {
     @Mock private OrderRepository orderRepository;
     @Mock private CatalogGateway catalog;
     @Mock private OrderTransactions orderTransactions;
+    // Step 7: placing an order announces it. Mocked rather than verified in most tests - what the
+    // publisher does is its own business; what matters here is that the saga still runs when it works.
+    @Mock private com.example.order.event.OrderEventPublisher events;
 
     @InjectMocks private OrderServiceImpl orderService;
 

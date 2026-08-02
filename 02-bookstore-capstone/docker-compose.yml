@@ -82,8 +82,47 @@ services:
       timeout: 3s
       retries: 10
 
+  # Kafka, in KRaft mode - one process, no ZooKeeper. Step 7.
+  #
+  # A single broker with replication factor 1, which is honest about what this is for: it demonstrates
+  # the programming model, not durability. A real cluster is three brokers with replication factor 3 and
+  # min.insync.replicas 2, so that acks=all means "on two machines" rather than "on the only machine".
+  kafka:
+    image: apache/kafka:3.9.1
+    container_name: bookstore-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # All three default to 3, which a one-broker cluster cannot satisfy - the broker starts and then
+      # fails the moment anything needs an internal topic, which looks like a client bug.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Zero, so a consumer joining an empty group starts consuming immediately instead of waiting out
+      # the default three-second rebalance window. Local-development impatience, nothing more.
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are created explicitly by the application (see KafkaTopicsConfig). Auto-creation would
+      # turn a typo in a topic name into a new, empty, permanently silent topic.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
 volumes:
   user-pgdata:
   book-pgdata:
   order-pgdata:
   payment-pgdata:
+  kafka-data:

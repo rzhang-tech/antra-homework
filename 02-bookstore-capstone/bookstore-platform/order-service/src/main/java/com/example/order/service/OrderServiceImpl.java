@@ -9,6 +9,7 @@ import com.example.order.dto.PageResponseDto;
 import com.example.order.entity.Order;
 import com.example.order.entity.OrderItem;
 import com.example.order.entity.OrderStatus;
+import com.example.order.event.OrderEventPublisher;
 import com.example.order.exception.CatalogUnavailableException;
 import com.example.order.exception.OrderNotAllowedException;
 import com.example.order.exception.ResourceNotFoundException;
@@ -34,6 +35,7 @@ public class OrderServiceImpl implements OrderService {
     private final OrderRepository orderRepository;
     private final CatalogGateway catalog;
     private final OrderTransactions orderTransactions;
+    private final OrderEventPublisher events;
 
     /**
      * Places an order, as a saga.
@@ -107,7 +109,19 @@ public class OrderServiceImpl implements OrderService {
         }
 
         // --- 4. The saga is complete. -----------------------------------------------------------
-        return OrderResponseDto.from(orderTransactions.markAwaitingPayment(order.getId()));
+        Order placed = orderTransactions.markAwaitingPayment(order.getId());
+
+        // --- 5. Tell anyone who cares, and do not wait to find out who. --------------------------
+        //
+        // Deliberately AFTER the commit in step 4, and deliberately not part of it. Publishing inside
+        // the transaction would announce an order that a later rollback un-places, and no consumer can
+        // un-read a message. Announcing something that did not happen is worse than being late.
+        //
+        // The cost of that ordering is the dual-write hole: the order is committed and the send can
+        // still fail, leaving an order nobody was told about. See OrderEventPublisher.
+        events.orderPlaced(placed);
+
+        return OrderResponseDto.from(placed);
     }
 
     /**

@@ -36,6 +36,12 @@
         </dependency>
 
         <!-- The client half of Step 6: fetches this service's configuration before any bean exists. -->
+        <!-- Step 7: order-service becomes a producer. -->
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.cloud</groupId>
             <artifactId>spring-cloud-starter-config</artifactId>

@@ -57,6 +57,63 @@ spring:
             read-timeout: 3000       # ms to wait for a response once connected
             logger-level: basic
 
+  kafka:
+    # Platform-wide, for the same reason the JWT signing key is: a producer and its consumers have to
+    # agree on the broker and on the topic name, or nothing works and nothing says why. A consumer
+    # subscribed to a topic that no one publishes to is simply silent.
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+
+      # `acks: all` - the leader answers only once every in-sync replica has the record. The default
+      # (`acks: 1`) means the leader alone has it, so a leader failing before replication loses an
+      # acknowledged write. Locally there is one broker and this changes nothing; it is here so the
+      # setting is a decision rather than an omission when Step 10 runs three.
+      acks: all
+
+      # Retries plus idempotence. Retrying alone is how one network hiccup becomes two copies of the
+      # same event: the broker wrote the record and the acknowledgement was lost, so the producer
+      # sends it again. `enable.idempotence` gives each producer a sequence number the broker
+      # deduplicates against, which makes a retry safe *within one producer session*.
+      #
+      # It is not exactly-once. A process that dies after committing an order and before publishing
+      # sends nothing at all, and a restarted producer is a new session. Consumers still have to be
+      # idempotent (Step 7c) - this only removes the duplicates the producer itself would create.
+      retries: 3
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+
+        # No `__TypeId__` header. JsonSerializer writes the producer's fully-qualified class name into
+        # one by default, and a JsonDeserializer downstream obeys it - so order-service would be
+        # instructing notification-service to instantiate `com.example.order.event.OrderPlaced`, a class
+        # that does not exist there and must not (D12). Consumers decide how to read the bytes; a
+        # producer publishes facts, not Java types.
+        spring.json.add.type.headers: false
+
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # Deliberately StringDeserializer, not JsonDeserializer. The JSON is turned into an object by a
+      # message converter, driven by the @KafkaListener method's own parameter type - see
+      # KafkaConsumerConfig. That is what lets one service consume two topics carrying two event types.
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+
+      # A new consumer group reads the topic from the beginning rather than from "now". `latest` is the
+      # default and it silently loses every event published before a consumer first started - which
+      # during development is every event, and in production is every event during a deployment gap.
+      auto-offset-reset: earliest
+
+      # Offsets are committed by the container after the listener returns, not on a timer by the client.
+      # Auto-commit acknowledges messages that have been *fetched*, so a crash mid-processing skips
+      # them: at-most-once, silently. This makes delivery at-least-once instead, which is a redelivery
+      # problem (solvable, Step 7c) rather than a data-loss problem (not solvable).
+      enable-auto-commit: false
+
+    listener:
+      ack-mode: RECORD
+
 server:
   error:
     # A stack trace in an error response tells an attacker the framework, the version and the package
@@ -64,6 +121,12 @@ server:
     include-stacktrace: never
 
 app:
+  kafka:
+    topics:
+      # Named after the fact, not after the service that happens to publish it today: `order.placed`
+      # rather than `order-service-events`. A topic outlives the code that writes to it.
+      order-placed: bookstore.order.placed
+
   jwt:
     # These two were identical in four services because they describe the *token format*, and every
     # service on the platform has to agree on it or nothing verifies. That is the definition of

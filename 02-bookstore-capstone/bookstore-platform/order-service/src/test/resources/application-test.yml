@@ -27,6 +27,13 @@ spring:
     locations: classpath:db/migration
 
 app:
+  kafka:
+    topics:
+      # The third time this step has been paid: a value that moved to the config server in Step 6 is
+      # invisible to tests, and the symptom is an unresolvable placeholder at context startup rather
+      # than anything mentioning Kafka. Tests own the values they depend on (D19's neighbour).
+      order-placed: bookstore.order.placed.test
+
   jwt:
     # Test-only, and irrelevant beyond satisfying the length constraint — nothing signed here outlives
     # the test JVM.

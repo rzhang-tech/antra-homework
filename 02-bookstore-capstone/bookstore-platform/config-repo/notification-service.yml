@@ -1,0 +1,34 @@
+# notification-service, all profiles.
+
+server:
+  # A port for /actuator/health and nothing else. This service publishes no API - the port exists so a
+  # readiness probe has something to ask, not so anyone can call in.
+  port: 8085
+
+app:
+  kafka:
+    groups:
+      # THE consumer group. Every instance of this service joins the same one, so Kafka hands each
+      # partition to exactly one of them and an order is confirmed once no matter how many replicas run.
+      # analytics-service uses a different name, which is why it receives its own copy of every message
+      # rather than competing for them.
+      #
+      # It is also durable state on the broker: the group's committed offsets are what "where had we got
+      # to" means. Rename it and this service starts again from `auto-offset-reset` - which is why the
+      # name is configuration nobody should change casually, and why it is written down here rather than
+      # left to a default derived from the application name.
+      notification: notification-service
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # Health and nothing else, narrowing the platform-wide list. This service has no security
+        # filter chain - there is no API to protect and no token to verify - so anything exposed here
+        # is exposed to whoever can reach the port. /actuator/env would hand over the shape of the
+        # platform's configuration, and /actuator/refresh would let a stranger rebind its beans.
+        #
+        # The cost is that changing this service's configuration means restarting it. For a stateless
+        # consumer whose offsets live on the broker, a restart is close to free - it resumes exactly
+        # where it left off - so this is the cheap side of the trade.
+        include: health
