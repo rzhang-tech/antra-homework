@@ -20,8 +20,8 @@ things actually hit during the build rather than assembled at the end.
   or full-text index, or a search engine if the catalog grows.
 - **No pagination cap.** `?size=100000` is accepted. A `max-page-size` limit belongs here before the API
   is public.
-- **`data.sql` + `ddl-auto: create-drop` is a dev crutch.** Fine for a local demo, wrong for anything
-  shared — Step 2 moves schema and seed data into versioned Flyway migrations.
+- ~~**`data.sql` + `ddl-auto: create-drop` is a dev crutch.**~~ Fixed in Step 2a: schema moved to Flyway
+  migrations, seed data to a repeatable migration loaded only under the dev profile.
 - **Everything is public.** Anyone can `DELETE /api/books/{id}`. Step 3.
 - **Only a context-loads test.** Real coverage is Step 4 — deliberately before the Step 5 refactor, since
   tests you write after a refactor only prove what the refactor produced.

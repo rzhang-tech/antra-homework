@@ -3,16 +3,17 @@
 Two views: where the project is **now**, and the **target** it is being built toward. Submission
 deliverable #4 is the target diagram.
 
-## Current state (Step 1)
+## Current state (Step 2a)
 
-One Spring Boot application, three layers, one in-memory database. Nothing distributed yet.
+One Spring Boot application, three layers, a real PostgreSQL in Docker. Nothing distributed yet.
 
 ```mermaid
 flowchart LR
     C[curl / Postman] -->|HTTP| CT[BookController]
     CT --> SV[BookService]
     SV --> RP[BookRepository]
-    RP --> DB[(H2 in-memory)]
+    RP --> DB[("PostgreSQL 17<br/>Docker + named volume")]
+    FW["Flyway<br/>db/migration"] -->|owns the schema| DB
     AOP[LoggingAspect]-.->|@Around| SV
     EH[GlobalExceptionHandler]-.->|@RestControllerAdvice| CT
 ```

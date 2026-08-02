@@ -7,14 +7,12 @@ spring:
     password: ${DB_PASSWORD}
   jpa:
     hibernate:
-      ddl-auto: validate   # never let Hibernate mutate a production schema; migrations own the DDL
+      ddl-auto: validate   # never let Hibernate mutate a production schema; Flyway owns the DDL
     show-sql: false
-  h2:
-    console:
-      enabled: false
-  sql:
-    init:
-      mode: never
+  flyway:
+    # Default location only (classpath:db/migration) — db/seed is deliberately absent, so the demo
+    # books cannot reach production.
+    locations: classpath:db/migration
 
 logging:
   level:

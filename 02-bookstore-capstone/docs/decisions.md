@@ -62,6 +62,86 @@ only Spring-managed beans are covered. Worth knowing — it is a standard interv
 
 ---
 
+## D6 — Flyway owns the schema; Hibernate is demoted to `validate`
+
+**Decision.** From Step 2 on, `ddl-auto: validate` in every profile. All DDL lives in versioned Flyway
+migrations under `db/migration`.
+
+**Why.** The moment the database became persistent (a Docker named volume), `create-drop` started
+deleting real data on every restart. The obvious alternative, `ddl-auto: update`, cannot actually evolve
+a schema: it only adds — never renames, never drops, never changes a type safely — and what it does
+depends on the database's current state, so environments drift apart over time. Most decisively, no
+entity annotation can express a *data* migration ("split `name` into `first_name`/`last_name` and move
+the existing rows"). A migration tool is the only thing that can.
+
+The payoff is reproducibility: any environment — a teammate's laptop, CI, a fresh container in Step 10,
+production — goes from empty to correct by replaying the same ordered files. Schema changes become
+reviewable diffs in Git rather than tribal knowledge.
+
+**Trade-off.** Every schema change now costs a hand-written SQL file, and an already-applied migration
+cannot be edited (Flyway's checksum check refuses to start) — corrections must be a new version. That
+rigidity is the point on a shared database, but it is friction on a solo toy project.
+
+---
+
+## D7 — Demo data is a repeatable migration, kept outside `db/migration`
+
+**Decision.** `db/migration` holds schema only, versioned `V1`, `V2`, `V3`, … Sample books live in
+`db/seed/R__dev_sample_books.sql` — a *repeatable* migration, loaded only because `application-dev.yml`
+adds `classpath:db/seed` to `spring.flyway.locations`. The prod profile lists `classpath:db/migration`
+alone.
+
+**Why the separate location.** Migrations run in *every* environment by design, so anything placed in
+them reaches production. Demo rows in a migration would ship five fake books to real users. Splitting by
+location makes "dev-only" a property of configuration rather than of discipline.
+
+**Why repeatable rather than versioned.** This was fixed after getting it wrong. The seed file was
+originally `V900__dev_sample_books.sql`, chosen to sit clearly apart from the real schema history. That
+pushed the database to version 900 — so the very next real migration, `V2`, was *lower* than the current
+version and Flyway refused to start:
+
+```
+Detected resolved migration not applied to database: 2.
+Validate failed: Migrations have failed validation
+```
+
+Flyway is right to refuse. Allowing an out-of-order migration means two environments can apply the same
+set of files in different orders, which is how schemas silently diverge.
+
+The real lesson is that seed data is not a step in the schema's evolution and should never consume a
+version number. A repeatable migration (`R__` prefix, no version) runs after every versioned migration
+and leaves the version sequence untouched.
+
+**Consequence.** Repeatable migrations re-run whenever their checksum changes, so the file must be
+idempotent — hence `ON CONFLICT (isbn) DO NOTHING`. That constraint is a preview of the same idempotency
+requirement that returns for Kafka consumers (Step 7) and the S3 → Lambda pipeline (Step 9).
+
+---
+
+## D8 — Migration numbering: plain sequential integers
+
+**Decision.** `V1`, `V2`, `V3`, … one number per schema change, never reused, never renumbered once
+applied anywhere but a local throwaway database.
+
+**Why.** The alternative used by most large teams is a timestamp (`V20260801143022__add_author.sql`),
+which exists to solve exactly one problem: two developers on two branches both create `V5`, and the
+merge is a conflict that neither Flyway nor Git can resolve safely. That problem does not exist on a
+single-developer project, and sequential numbers have a real advantage here — they read as a history
+("the schema is on its fourth change") and line up with the capstone's step-by-step commit requirement.
+
+**Rules that follow from it.**
+
+- **Never edit an applied migration.** Flyway stores a checksum; changing the file makes it refuse to
+  start. Correct a mistake with a *new* migration.
+- **The one exception** is a migration that has only ever run against a local database you are willing
+  to destroy — then editing the file plus `docker compose down -v` is legitimate, and is exactly how the
+  V900 mistake above was corrected.
+- **Never reuse a number**, even for a migration that was deleted before being committed.
+- On a team, if two branches collide on a number, renumber *your* migration upward before merging —
+  safe precisely because it has not yet been applied to any shared environment.
+
+---
+
 ## D5 — Cross-service references are plain IDs, not foreign keys
 
 **Decision.** `order_item.book_id` and `orders.user_id` are plain `BIGINT` columns with no FK constraint.

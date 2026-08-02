@@ -1,0 +1,31 @@
+# Local infrastructure for the capstone. Step 2 needs only PostgreSQL; Kafka and the other services
+# join this file in Steps 7 and 10.
+#
+#   docker compose up -d      start
+#   docker compose ps         check health
+#   docker compose down       stop (data survives — it lives in the named volume)
+#   docker compose down -v    stop AND delete the data, so Flyway rebuilds from V1 on next start
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: bookstore-postgres
+    environment:
+      POSTGRES_DB: bookstore
+      POSTGRES_USER: bookstore
+      POSTGRES_PASSWORD: bookstore
+    ports:
+      # host:container — the app connects to localhost:5432 from outside Docker
+      - "5432:5432"
+    volumes:
+      # A named volume, so data survives `docker compose down` and container restarts.
+      # This is exactly why ddl-auto: create-drop is no longer acceptable.
+      - bookstore-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bookstore -d bookstore"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  bookstore-pgdata:

@@ -1,26 +1,23 @@
-# Local development: in-memory H2, schema generated from the entities, seeded with sample rows.
-# Step 2 replaces this with PostgreSQL + Flyway migrations.
+# Local development against the Dockerized PostgreSQL in ../../docker-compose.yml.
+# Start it first:  docker compose up -d   (from 02-bookstore-capstone/)
 spring:
   datasource:
-    url: jdbc:h2:mem:bookstore;DB_CLOSE_DELAY=-1
-    driver-class-name: org.h2.Driver
-    username: sa
-    password:
-  h2:
-    console:
-      enabled: true   # browse the data at http://localhost:8080/h2-console
+    url: jdbc:postgresql://localhost:5432/bookstore
+    username: bookstore
+    password: bookstore
   jpa:
     hibernate:
-      ddl-auto: create-drop
-    # data.sql must run *after* Hibernate has created the tables, not before
-    defer-datasource-initialization: true
+      # Flyway owns the schema now. Hibernate may only check that the entity matches the tables —
+      # if they drift, the app refuses to start instead of silently altering the database.
+      ddl-auto: validate
     show-sql: true
     properties:
       hibernate:
         format_sql: true
-  sql:
-    init:
-      mode: always   # run data.sql on startup
+  flyway:
+    # db/migration = the real schema (runs in every environment)
+    # db/seed      = demo rows, dev only — this line is the only thing that loads them
+    locations: classpath:db/migration,classpath:db/seed
 
 logging:
   level:

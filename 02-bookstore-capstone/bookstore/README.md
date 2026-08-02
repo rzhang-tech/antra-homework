@@ -7,7 +7,7 @@ One Spring Boot application. Steps 1–4 build it up; Step 5 splits it into micr
 ### Layers, built inside-out
 
 ```
-Client → BookController (HTTP) → BookService (rules) → BookRepository (data) → H2
+Client → BookController (HTTP) → BookService (rules) → BookRepository (data) → PostgreSQL
               ↑                        ↑
    GlobalExceptionHandler        LoggingAspect (@Around)
 ```
@@ -79,13 +79,15 @@ managed entity is a real write.
 
 ### Profiles
 
-| Profile | Database | DDL | Notes |
-|---------|----------|-----|-------|
-| `dev` (default) | H2 in-memory | `create-drop` | seeded from `data.sql`, SQL logging on, H2 console on |
-| `prod` | from `${DB_URL}` etc. | `validate` | no credentials in the file; Hibernate may never alter the schema |
+| Profile | Database | DDL | Flyway locations | Notes |
+|---------|----------|-----|------------------|-------|
+| `dev` (default) | PostgreSQL on `localhost:5432` | `validate` | `db/migration` + `db/seed` | SQL logging on, demo books loaded |
+| `prod` | from `${DB_URL}` etc. | `validate` | `db/migration` only | no credentials in the file; no demo data |
 
-`prod` uses `ddl-auto: validate` on purpose — letting Hibernate mutate a production schema is how data
-gets lost. Migrations own the DDL from Step 2 onward.
+Both profiles use `ddl-auto: validate` — Hibernate may only check that the entities match the tables, and
+the app refuses to start if they have drifted. Flyway owns every schema change. See
+[D6](../docs/decisions.md) for why, and [D7](../docs/decisions.md) for why the demo rows are separated
+out by location rather than by convention.
 
 `spring.jpa.open-in-view` is `false` globally: the default (`true`) keeps the persistence session open
 through view rendering, which silently allows lazy loading in the controller and hides N+1 problems.
@@ -94,15 +96,26 @@ Turning it off makes those mistakes fail loudly, which matters before Step 2's N
 ## Run
 
 ```bash
+docker compose up -d
+```
+
+(from `02-bookstore-capstone/` — starts PostgreSQL 17)
+
+```bash
 ./mvnw spring-boot:run
 ```
 
-`http://localhost:8080`, dev profile, five seeded books. H2 console at `/h2-console`
-(JDBC URL `jdbc:h2:mem:bookstore`, user `sa`, no password).
+`http://localhost:8080`, dev profile. Inspect the database directly with:
+
+```bash
+docker exec -it bookstore-postgres psql -U bookstore -d bookstore
+```
 
 ```bash
 ./mvnw test
 ```
+
+Tests currently need PostgreSQL running — Step 4 removes that with Testcontainers.
 
 ## Verified behaviour
 
@@ -122,8 +135,60 @@ All of these were run against the live app:
 
 See [test.http](test.http) to re-run them.
 
-## Next — Step 2
+---
 
-Swap H2 for PostgreSQL in Docker, add the `Author` entity and the `Book → Author` relation, put the
-schema under Flyway, add a justified index, create and then fix an N+1 query, and show the `EXPLAIN
-ANALYZE` plan.
+# Step 2 — Data Layer
+
+Split into five parts so each new concept lands on its own.
+
+## 2a — PostgreSQL + Flyway ☑
+
+Swapped the in-memory H2 for PostgreSQL 17 in Docker, and moved schema ownership from Hibernate to
+Flyway. **No Java code changed** — the point of the step is that replacing the storage engine should not
+touch business logic.
+
+| Change | File |
+|--------|------|
+| PostgreSQL with a named volume | [`../docker-compose.yml`](../docker-compose.yml) |
+| The schema, by hand | `src/main/resources/db/migration/V1__init.sql` |
+| Demo rows, dev only | `src/main/resources/db/seed/R__dev_sample_books.sql` |
+| Driver + Flyway; H2 removed | `pom.xml` |
+| Datasource, `ddl-auto: validate`, Flyway locations | `application-dev.yml`, `application-prod.yml` |
+
+**What the first boot prints:**
+
+```
+Creating Schema History table "public"."flyway_schema_history"
+Migrating schema "public" to version "1 - init"
+Migrating schema "public" with repeatable migration "dev sample books"
+Successfully applied 2 migrations to schema "public", now at version v1
+```
+
+**The second boot:**
+
+```
+Current version of schema "public": 1
+Schema "public" is up to date. No migration necessary.
+```
+
+**And the point of the whole step** — a book created before a restart is still there afterwards. Under
+Step 1's H2 it would have been gone.
+
+The schema also gained a database-level constraint that the DTO validation cannot replace:
+
+```sql
+CONSTRAINT book_stock_non_negative CHECK (stock >= 0)
+```
+
+Bean Validation gives the user a good error message; the CHECK constraint guarantees the data is never
+wrong, including against a bad migration, a manual `UPDATE`, or another service writing to the same
+table after Step 5. Both layers earn their place.
+
+Two design notes worth reading before Step 2b: [D6](../docs/decisions.md) (why Flyway rather than
+`ddl-auto`) and [D7](../docs/decisions.md) (why the seed file is repeatable, written up after the
+original versioned attempt broke the migration ordering).
+
+## 2b–2e — still to do
+
+`Author` entity and relation · the N+1 problem, reproduced then fixed · a justified index plus
+`EXPLAIN ANALYZE` · `@Version` optimistic locking under concurrent writes.

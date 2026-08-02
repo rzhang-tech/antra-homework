@@ -14,7 +14,7 @@ technology enters.
 | Step | Delivers | Status |
 |------|----------|--------|
 | 1 | Monolith skeleton — Book CRUD, layering, validation, AOP | ☑ done |
-| 2 | PostgreSQL, indexes, transactions, N+1, optimistic locking | next |
+| 2 | PostgreSQL, indexes, transactions, N+1, optimistic locking | ◐ in progress — 2a done (PostgreSQL + Flyway) |
 | 3–11 | Security · Testing · Microservices · Config · Kafka · Gateway · AWS · K8s · CI/CD | planned |
 
 ## Layout
@@ -37,21 +37,31 @@ technology enters.
 | Framework | Spring Boot 3.5.16 | Pinned to the Spring Cloud 2025.0.x release train — see [D1](docs/decisions.md) |
 | Web | Spring Web (REST) | |
 | Persistence | Spring Data JPA / Hibernate | |
-| Database | H2 now → PostgreSQL in Step 2 | |
+| Database | PostgreSQL 17 (Docker) | |
+| Schema | Flyway migrations | Hibernate runs as `validate` only — see [D6](docs/decisions.md) |
 | Validation | Jakarta Bean Validation | |
 | Cross-cutting | Spring AOP | |
 | Boilerplate | Lombok | |
 
 ## Run it
 
+Start the database first — the app no longer carries its own:
+
+```bash
+docker compose up -d
+```
+
+Then the application:
+
 ```bash
 cd bookstore && ./mvnw spring-boot:run
 ```
 
-Starts on `http://localhost:8080` under the `dev` profile: in-memory H2, schema generated from the
-entities, seeded with five books. The H2 console is at `/h2-console`.
+Starts on `http://localhost:8080` under the `dev` profile. On first boot Flyway creates the schema from
+`db/migration` and loads five demo books from `db/seed`; on later boots it reports "up to date" and the
+data persists across restarts.
 
-Run the tests:
+Run the tests (PostgreSQL must be up — Step 4 removes that requirement with Testcontainers):
 
 ```bash
 cd bookstore && ./mvnw test

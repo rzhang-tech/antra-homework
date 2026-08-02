@@ -45,11 +45,24 @@
             <artifactId>spring-boot-starter-aop</artifactId>
         </dependency>
 
-        <!-- Step 1 uses in-memory H2; Step 2 replaces it with PostgreSQL -->
+        <!-- Step 2: real PostgreSQL, running in Docker (see ../docker-compose.yml) -->
         <dependency>
-            <groupId>com.h2database</groupId>
-            <artifactId>h2</artifactId>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
             <scope>runtime</scope>
+        </dependency>
+
+        <!--
+          Flyway owns the schema from here on: Hibernate is demoted to ddl-auto: validate.
+          Flyway 10+ splits per-database support out of the core jar, so PostgreSQL needs both.
+        -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
         </dependency>
 
         <dependency>
