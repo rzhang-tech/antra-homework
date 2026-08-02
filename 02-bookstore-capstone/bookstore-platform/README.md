@@ -44,7 +44,7 @@ Everything at once:
 ./mvnw test
 ```
 
-71 tests across the three services. Testcontainers supplies the databases, so nothing needs to be running.
+79 tests across the three services. Testcontainers supplies the databases, so nothing needs to be running.
 
 ---
 
@@ -221,7 +221,95 @@ With book-service stopped, every order attempt still travels the full path and p
 failing. Under load that means every request thread parked for seconds waiting on a service already
 known to be down — the classic cascading failure. 5c makes it fail fast.
 
-## Next — 5c
+---
 
-Resilience4j: a circuit breaker that stops calling a service that is clearly down, a retry for
-transient blips, and a fallback so browsing degrades instead of erroring.
+# Step 5c — Resilience4j: failing fast
+
+5b left ordering correct but slow to fail. With book-service down, every attempt travelled the full path
+and paid the timeout before giving up — so under load every request thread parks for seconds waiting on
+a service already known to be dead. That is how one service's outage becomes everybody's.
+
+## Measured, on the running platform
+
+`book-service` stopped, orders placed one after another:
+
+```
+attempt 1   503   761 ms   CLOSED     buffered=3
+attempt 2   503   727 ms   CLOSED     buffered=4
+attempt 3   503   755 ms   OPEN       failureRate=60%
+attempt 4   503    85 ms   OPEN
+attempt 5   503    87 ms   OPEN
+attempt 6   503    79 ms   OPEN
+```
+
+**761 ms to 85 ms.** The circuit opened once five calls had accumulated (`minimum-number-of-calls`) and
+60% of them had failed. After that no request leaves the process at all — the remaining 85 ms is
+order-service's own overhead, not waiting on the catalog.
+
+Then book-service was restarted:
+
+```
+                     OPEN        still refusing; the 10s cooldown has not elapsed
+  (wait 11s)         HALF_OPEN   three probes admitted
+  201                CLOSED      probes passed; normal service resumed
+```
+
+The whole state machine, from `/actuator/circuitbreakers`, without touching a config file.
+
+## Two policies, because the two calls are not alike
+
+`BookClient` says *what* the HTTP calls are. `CatalogGateway` decides *how they may fail* — which has to
+be per-operation, and a policy on the Feign client as a whole could not be.
+
+| | `findById` (GET) | `purchase` (POST) |
+|---|---|---|
+| Retry | **yes**, 3 attempts with backoff | **never** |
+| Circuit breaker | yes | yes |
+
+**Why the write is never retried.** Repeating a GET is free. Repeating a stock decrement is *selling the
+book twice* — and the dangerous case is the one that looks like failure: book-service commits the
+decrement and the response is lost coming back. The caller sees a timeout and cannot distinguish it
+from "nothing happened". Retry and a second copy leaves the shelf; do not, and an order fails with
+stock already gone. Neither is correct; losing stock is recoverable, overselling a customer is not.
+The real fix is making the operation idempotent, which is 5d.
+
+## The fallback does not invent data
+
+Tutorials return a cached or dummy value from the fallback. For a price and a stock level that is
+indefensible — charging a made-up price is worse than an error. The fallback here raises
+`CatalogUnavailableException`, a clean 503, **immediately**.
+
+**Failing fast is the fallback.** The value is not a substitute value; it is that the caller finds out
+in microseconds instead of holding a thread for three seconds.
+
+## Three bugs, all found by tests
+
+**1. `ignore-exceptions` does not stop the fallback running.** It keeps business errors out of the
+failure *rate* — but a fallback catches everything the guarded method throws. So "no such book" reached
+the customer as **503 Service Unavailable**: the catalog had answered correctly and order-service
+reported an outage. The fallback now rethrows business answers untouched.
+
+That exclusion matters in the other direction too: a breaker that counts 404s as failures **opens under
+entirely healthy traffic**, taking the catalog "down" because customers mistyped an id.
+
+**2. Resilience4j nests Retry *outside* CircuitBreaker by default.** Two consequences: one retried call
+records three separate failures against the breaker, and — worse — an open circuit's refusal travels out
+to Retry, which retries *being told no* through the full backoff. "Fail fast" measured **619 ms**.
+
+**3. Lower `Ordered` values run first, and therefore sit further out.** Fixing (2) by setting
+`circuit-breaker-aspect-order: 2, retry-aspect-order: 1` changed nothing, because that put Retry outside
+again. The build looked configured and behaved identically; only the failing test noticed. Correct is
+`circuit-breaker-aspect-order: 1, retry-aspect-order: 2`.
+
+## Circuit state is observable
+
+`/actuator/circuitbreakers` and `/actuator/circuitbreakerevents` are exposed and, on this profile, open.
+A breaker whose state nobody can see converts an outage into a mystery — "it started working again on
+its own" is not an incident report. In a real deployment these are reachable only from inside the
+cluster; the gateway never routes `/actuator/**` from outside.
+
+## Next — 5d
+
+`payment-service`, and the problem 5b and 5c have been deferring: an order that reserves stock in another
+service's database has no transaction to roll back. Idempotency keys, compensating actions, and a saga
+that survives the process dying halfway through.

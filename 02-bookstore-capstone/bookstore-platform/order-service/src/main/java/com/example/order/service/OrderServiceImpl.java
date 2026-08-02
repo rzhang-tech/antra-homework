@@ -1,6 +1,6 @@
 package com.example.order.service;
 
-import com.example.order.client.BookClient;
+import com.example.order.client.CatalogGateway;
 import com.example.order.dto.BookSnapshot;
 import com.example.order.dto.OrderItemRequestDto;
 import com.example.order.dto.OrderRequestDto;
@@ -32,7 +32,7 @@ import java.util.Map;
 public class OrderServiceImpl implements OrderService {
 
     private final OrderRepository orderRepository;
-    private final BookClient bookClient;
+    private final CatalogGateway catalog;
 
     /**
      * Places an order.
@@ -72,7 +72,7 @@ public class OrderServiceImpl implements OrderService {
         // --- 1. Read. No side effects yet, so failing here costs nothing. -----------------------
         Map<Long, BookSnapshot> books = new LinkedHashMap<>();
         for (Long bookId : quantities.keySet()) {
-            BookSnapshot book = bookClient.findById(bookId);
+            BookSnapshot book = catalog.findById(bookId);
             if (book == null || book.id() == null) {
                 throw new ResourceNotFoundException("Book not found with id " + bookId);
             }
@@ -96,7 +96,7 @@ public class OrderServiceImpl implements OrderService {
         List<Long> decremented = new ArrayList<>();
         try {
             for (var entry : quantities.entrySet()) {
-                bookClient.purchase(entry.getKey(), Map.of("quantity", entry.getValue()));
+                catalog.purchase(entry.getKey(), entry.getValue());
                 decremented.add(entry.getKey());
             }
         } catch (RuntimeException ex) {

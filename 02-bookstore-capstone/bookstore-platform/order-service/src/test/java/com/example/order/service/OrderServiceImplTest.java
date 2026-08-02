@@ -1,6 +1,6 @@
 package com.example.order.service;
 
-import com.example.order.client.BookClient;
+import com.example.order.client.CatalogGateway;
 import com.example.order.dto.BookSnapshot;
 import com.example.order.dto.OrderItemRequestDto;
 import com.example.order.dto.OrderRequestDto;
@@ -23,12 +23,12 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -37,7 +37,7 @@ import static org.mockito.Mockito.when;
 /**
  * Unit tests for placing and reading orders, with book-service mocked.
  *
- * <p>Mocking the Feign client is the right level here: these tests are about order-service's rules —
+ * <p>Mocking the gateway is the right level here: these tests are about order-service's rules —
  * what it validates, what it captures, who may see what. Whether the HTTP call itself behaves is a
  * different question, answered by the WireMock-backed tests in 5c.
  */
@@ -46,7 +46,7 @@ import static org.mockito.Mockito.when;
 class OrderServiceImplTest {
 
     @Mock private OrderRepository orderRepository;
-    @Mock private BookClient bookClient;
+    @Mock private CatalogGateway catalog;
 
     @InjectMocks private OrderServiceImpl orderService;
 
@@ -73,7 +73,7 @@ class OrderServiceImplTest {
         @Test
         @DisplayName("captures the price at order time rather than referencing it")
         void capturesPrice() {
-            when(bookClient.findById(1L)).thenReturn(book(1L, "Clean Code", "42.50", 10));
+            when(catalog.findById(1L)).thenReturn(book(1L, "Clean Code", "42.50", 10));
             expectSave();
 
             OrderResponseDto result = orderService.place(CUSTOMER, order(1L, 2));
@@ -87,7 +87,7 @@ class OrderServiceImplTest {
         @Test
         @DisplayName("records the customer from the token, never from the request")
         void recordsCustomerFromToken() {
-            when(bookClient.findById(1L)).thenReturn(book(1L, "Clean Code", "42.50", 10));
+            when(catalog.findById(1L)).thenReturn(book(1L, "Clean Code", "42.50", 10));
             expectSave();
 
             orderService.place(CUSTOMER, order(1L, 1));
@@ -101,30 +101,30 @@ class OrderServiceImplTest {
         @Test
         @DisplayName("reserves stock in book-service before writing the order")
         void reservesStock() {
-            when(bookClient.findById(1L)).thenReturn(book(1L, "Clean Code", "42.50", 10));
+            when(catalog.findById(1L)).thenReturn(book(1L, "Clean Code", "42.50", 10));
             expectSave();
 
             orderService.place(CUSTOMER, order(1L, 3));
 
-            verify(bookClient).purchase(1L, Map.of("quantity", 3));
+            verify(catalog).purchase(1L, 3);
         }
 
         @Test
         @DisplayName("rejects an unknown book without reserving anything")
         void rejectsUnknownBook() {
-            when(bookClient.findById(99L)).thenReturn(null);
+            when(catalog.findById(99L)).thenReturn(null);
 
             assertThatThrownBy(() -> orderService.place(CUSTOMER, order(99L, 1)))
                     .isInstanceOf(ResourceNotFoundException.class);
 
-            verify(bookClient, never()).purchase(anyLong(), any());
+            verify(catalog, never()).purchase(anyLong(), anyInt());
             verify(orderRepository, never()).save(any());
         }
 
         @Test
         @DisplayName("refuses to oversell before calling the catalog's write endpoint")
         void refusesOverselling() {
-            when(bookClient.findById(1L)).thenReturn(book(1L, "Clean Code", "42.50", 3));
+            when(catalog.findById(1L)).thenReturn(book(1L, "Clean Code", "42.50", 3));
 
             assertThatThrownBy(() -> orderService.place(CUSTOMER, order(1L, 4)))
                     .isInstanceOf(OrderNotAllowedException.class)
@@ -132,13 +132,13 @@ class OrderServiceImplTest {
 
             // Reading is free; reserving is not. Validating everything first is what keeps a bad
             // order from leaving half-applied changes in another service's database.
-            verify(bookClient, never()).purchase(anyLong(), any());
+            verify(catalog, never()).purchase(anyLong(), anyInt());
         }
 
         @Test
         @DisplayName("collapses two lines for the same book into one reservation")
         void collapsesDuplicateLines() {
-            when(bookClient.findById(1L)).thenReturn(book(1L, "Clean Code", "42.50", 10));
+            when(catalog.findById(1L)).thenReturn(book(1L, "Clean Code", "42.50", 10));
             expectSave();
 
             orderService.place(CUSTOMER, new OrderRequestDto(List.of(
@@ -147,7 +147,7 @@ class OrderServiceImplTest {
 
             // One call for 5, not two calls that each pass their own stock check while together
             // exceeding it.
-            verify(bookClient).purchase(1L, Map.of("quantity", 5));
+            verify(catalog).purchase(1L, 5);
         }
     }
 

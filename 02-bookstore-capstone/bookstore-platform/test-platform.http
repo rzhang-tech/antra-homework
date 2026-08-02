@@ -164,3 +164,46 @@ Authorization: Bearer {{userToken}}
 Content-Type: application/json
 
 { "items": [ { "bookId": 1, "quantity": 1 } ] }
+
+### ---------------------------------------------------------------------------
+### Step 5c — the circuit breaker, live
+###
+### 20-24 are a demonstration to run in order with book-service STOPPED, then
+### restarted. Watch the state change between each.
+### ---------------------------------------------------------------------------
+
+### 20. Circuit state. CLOSED while the catalog is healthy.
+GET {{orderService}}/actuator/circuitbreakers
+
+### 21. Stop book-service, then run this five or six times.
+###     The first few take ~750 ms (three retries each) and return 503.
+###     Once five calls have accumulated and half have failed, the circuit OPENS.
+POST {{orderService}}/api/orders
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "items": [ { "bookId": 1, "quantity": 1 } ] }
+
+### 22. State again -> OPEN, failureRate 60%
+GET {{orderService}}/actuator/circuitbreakers
+
+### 23. Order again -> still 503, but in ~85 ms instead of ~750 ms.
+###     No request leaves the process at all; the remaining time is
+###     order-service's own overhead.
+POST {{orderService}}/api/orders
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "items": [ { "bookId": 1, "quantity": 1 } ] }
+
+### 24. Restart book-service, wait 11 seconds (wait-duration-in-open-state: 10s),
+###     then order again. The state goes OPEN -> HALF_OPEN -> CLOSED as the
+###     three permitted probes succeed.
+POST {{orderService}}/api/orders
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "items": [ { "bookId": 1, "quantity": 1 } ] }
+
+### 25. Every state transition, with timestamps
+GET {{orderService}}/actuator/circuitbreakerevents

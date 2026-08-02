@@ -240,6 +240,49 @@ class.
 
 ---
 
+## D13 — Retry reads, never retry the stock write
+
+**Decision.** `CatalogGateway.findById` is retried three times with backoff. `CatalogGateway.purchase`
+is never retried. Both are behind the same circuit breaker.
+
+**Why.** A GET is idempotent, so repeating it after a dropped packet costs nothing. Decrementing stock
+is not, and the case that makes retry dangerous is the one that looks like failure: book-service commits
+the decrement and the response is lost on the way back. The caller sees a timeout and cannot distinguish
+it from "nothing happened".
+
+Retrying takes a second copy off the shelf. Not retrying leaves an order that failed with stock already
+gone. **Neither is correct** — this layer cannot tell the two cases apart. Losing stock is recoverable
+by reconciliation; overselling a customer is not, so the error to prefer is the one that under-sells.
+
+**The actual fix, deferred to 5d.** Make the operation idempotent — a request id book-service records,
+so a repeat is recognised rather than reapplied. Then retry becomes safe and the dilemma disappears.
+That this decision exists at all is a symptom, not a design.
+
+---
+
+## D14 — A fallback that fails fast, not one that invents data
+
+**Decision.** The circuit-breaker fallback raises `CatalogUnavailableException` (a 503) immediately. It
+returns no cached price, no default stock, no placeholder book.
+
+**Why.** The usual example returns a substitute value so the caller "degrades gracefully". For a price
+and a stock level that would be indefensible: charging an invented price, or selling stock that may not
+exist, is far worse than an honest error. Graceful degradation is only graceful when the degraded answer
+is still true.
+
+**Where the value actually comes from.** Not the substitute — the *speed*. Measured on the running
+platform, with book-service stopped, ordering went from **761 ms to 85 ms** once the circuit opened, and
+no request left the process. A catalog outage stops consuming order-service's threads, which is what
+prevents one service's failure from becoming everybody's.
+
+**A caveat worth remembering.** `ignore-exceptions` keeps business errors out of the failure rate, but
+does **not** stop the fallback running — a fallback catches everything the guarded method throws. Without
+an explicit rethrow, "no such book" reached the customer as 503: the catalog answered correctly and the
+service reported an outage. Excluding them from the *rate* matters just as much in the other direction:
+a breaker that counts 404s as failures opens under entirely healthy traffic.
+
+---
+
 ## D5 — Cross-service references are plain IDs, not foreign keys
 
 **Decision.** `order_item.book_id` and `orders.user_id` are plain `BIGINT` columns with no FK constraint.

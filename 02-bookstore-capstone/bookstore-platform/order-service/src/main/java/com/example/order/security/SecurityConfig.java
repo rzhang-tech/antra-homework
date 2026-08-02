@@ -41,6 +41,22 @@ public class SecurityConfig {
                         .accessDeniedHandler(securityErrorWriter))
 
                 .authorizeHttpRequests(auth -> auth
+                        /*
+                         * Operational endpoints, open on this profile.
+                         *
+                         * The deny-by-default rule caught these first, which was correct and
+                         * inconvenient in equal measure: circuit-breaker state has to be readable by
+                         * whoever is diagnosing an outage, and at that moment nobody is minting a JWT.
+                         *
+                         * Left open here because in a real deployment these are not exposed publicly at
+                         * all — they are reachable only from inside the cluster, and the gateway (Step
+                         * 8) never routes /actuator/** from outside. Relying on network topology rather
+                         * than on a token is the normal arrangement for health and metrics, and Step 11
+                         * revisits it when the endpoints start carrying more.
+                         */
+                        .requestMatchers("/actuator/health", "/actuator/health/**",
+                                "/actuator/circuitbreakers", "/actuator/circuitbreakerevents").permitAll()
+
                         // Listing every order on the platform is staff-only. Declared before the
                         // general /api/orders rules because the first match wins.
                         .requestMatchers(HttpMethod.GET, "/api/orders/all").hasRole("ADMIN")
