@@ -120,6 +120,45 @@ class ConfigServerContractTest {
         assertThat(keys).containsOnly(keys.getFirst());
     }
 
+
+    @Test
+    @DisplayName("the gateway's real route table sends each path to the service that owns it")
+    void everyApiPathIsRoutedToItsOwner() {
+        // The half RoutingTest cannot cover. api-gateway's tests run against a stand-in route table,
+        // because the real one lives here and tests do not read the config server - so without this,
+        // renaming a path in the config repo would break every client and pass every test.
+        ObjectNode routes = mergedSourceFor("/api-gateway/dev");
+
+        record Route(String service, String paths, String address) {}
+
+        List<Route> expected = List.of(
+                new Route("user-service", "/api/auth/**,/api/users/**", "8081"),
+                new Route("book-service", "/api/books/**,/api/authors/**", "8082"),
+                new Route("order-service", "/api/orders/**", "8083"),
+                new Route("payment-service", "/api/payments/**", "8084"));
+
+        for (int i = 0; i < expected.size(); i++) {
+            Route route = expected.get(i);
+            String prefix = "spring.cloud.gateway.server.webflux.routes[" + i + "]";
+
+            assertThat(routes.path(prefix + ".id").asText()).isEqualTo(route.service());
+            assertThat(routes.path(prefix + ".predicates[0]").asText())
+                    .isEqualTo("Path=" + route.paths());
+
+            // The URI is a placeholder the gateway resolves against its own environment, which is what
+            // lets prod swap addresses for Kubernetes service names without touching the route table.
+            String placeholder = routes.path(prefix + ".uri").asText();
+            assertThat(placeholder).startsWith("${app.services.").endsWith(".url}");
+
+            String key = placeholder.substring(2, placeholder.length() - 1);
+            assertThat(routes.path(key).asText()).endsWith(":" + route.address());
+        }
+
+        // Index order is asserted along with the contents, because Gateway takes the first predicate
+        // that matches. A broad path moved above a narrow one silently swallows it, and nothing warns.
+        assertThat(routes.has("spring.cloud.gateway.server.webflux.routes[4].id")).isFalse();
+    }
+
     @Test
     @DisplayName("an unknown application gets the shared defaults, not an error")
     void unknownApplicationFallsBackToSharedFilesOnly() {

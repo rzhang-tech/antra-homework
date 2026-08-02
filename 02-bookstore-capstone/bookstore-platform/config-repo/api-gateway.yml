@@ -1,0 +1,70 @@
+# api-gateway, all profiles.
+
+server:
+  # The only port a client needs. 8081-8086 keep working and stay reachable in development, which is
+  # not the same as being *supposed* to be reachable - see Step 8b on why the services still verify
+  # every token themselves. In Step 10 a NetworkPolicy makes this the only way in for real.
+  port: 8080
+
+spring:
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+            # ORDER MATTERS. Predicates are evaluated top to bottom and the first match wins, so a
+            # broad path placed above a narrow one silently swallows it. Nothing warns; requests just
+            # arrive at the wrong service.
+            - id: user-service
+              uri: ${app.services.user.url}
+              predicates:
+                # Two paths, one service. `/api/users/**` has no controller behind it yet - the
+                # requirement asks for the route and user-service will answer 404 until somebody
+                # writes one. Routing to a 404 is the honest behaviour: the route is the platform's
+                # contract about WHERE users live, not a promise that the endpoint exists.
+                - Path=/api/auth/**,/api/users/**
+
+            - id: book-service
+              uri: ${app.services.book.url}
+              predicates:
+                - Path=/api/books/**,/api/authors/**
+
+            - id: order-service
+              uri: ${app.services.order.url}
+              predicates:
+                - Path=/api/orders/**
+
+            - id: payment-service
+              uri: ${app.services.payment.url}
+              predicates:
+                - Path=/api/payments/**
+
+          # NOTHING routes /actuator/**, and that is the point rather than an omission.
+          #
+          # Since Step 5c several comments have justified leaving /actuator/circuitbreakers open on the
+          # grounds that "the gateway never routes /actuator/** from outside". This is where that
+          # promise is actually kept: every route above starts /api, so there is no path from port 8080
+          # to any service's actuator. The gateway's own /actuator/health is served by the gateway, not
+          # forwarded - it answers for the front door, not for anything behind it.
+          #
+          # notification-service and analytics-service appear nowhere in this file for a related
+          # reason: they have no API. A route to them would be a route to nothing.
+
+          httpclient:
+            # The same reasoning as Step 5b's Feign timeouts, one layer further out. An unbounded
+            # gateway is worse than an unbounded client: it holds the CUSTOMER's connection open too,
+            # so one slow service exhausts the edge and takes down routes that have nothing to do
+            # with it.
+            connect-timeout: 2000
+            response-timeout: 10s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # `gateway` lists the live routes, which is the first thing to look at when a request lands
+        # somewhere unexpected. ADMIN-only, like every non-health endpoint since Step 6c.
+        include: health,info,refresh,env,loggers,metrics,gateway
+  endpoint:
+    health:
+      show-details: always

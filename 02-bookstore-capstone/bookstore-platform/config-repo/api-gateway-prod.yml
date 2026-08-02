@@ -1,0 +1,15 @@
+# api-gateway, production.
+#
+# Hostnames supplied by the environment, exactly as order-service's BOOK_SERVICE_URL is. In Step 10
+# these become Kubernetes service names resolved by cluster DNS.
+
+app:
+  services:
+    user:
+      url: ${USER_SERVICE_URL}
+    book:
+      url: ${BOOK_SERVICE_URL}
+    order:
+      url: ${ORDER_SERVICE_URL}
+    payment:
+      url: ${PAYMENT_SERVICE_URL}

@@ -29,6 +29,7 @@
     <modules>
         <!-- First, because from Step 6 every other service refuses to start without it. -->
         <module>config-server</module>
+        <module>api-gateway</module>
         <module>user-service</module>
         <module>book-service</module>
         <module>order-service</module>

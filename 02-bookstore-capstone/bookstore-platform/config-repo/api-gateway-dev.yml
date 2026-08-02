@@ -1,0 +1,15 @@
+# api-gateway, local development.
+
+app:
+  services:
+    # Addresses, because everything runs on one laptop. Step 10 replaces each of these with a
+    # Kubernetes service name and nothing else in this file changes - which is the reason they are
+    # placeholders in the route definitions rather than literals.
+    user:
+      url: http://localhost:8081
+    book:
+      url: http://localhost:8082
+    order:
+      url: http://localhost:8083
+    payment:
+      url: http://localhost:8084

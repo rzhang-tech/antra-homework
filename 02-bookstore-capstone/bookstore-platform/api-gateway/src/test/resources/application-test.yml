@@ -1,0 +1,40 @@
+# The profile every gateway test runs under.
+#
+# THE ROUTE TABLE IS DUPLICATED HERE, and this is the config-move rule from config-repo/README.md
+# arriving exactly where it was predicted to. The real routes live in the config repo, tests do not
+# read the config server, so a test that wanted the real ones would need a second process running.
+#
+# What that costs and what it buys:
+#
+#   costs   this table can drift from the real one, and a test passing here proves nothing about
+#           production's routing
+#   buys    a test of what Spring Cloud Gateway DOES with a route table - forwards the path, keeps
+#           the headers, 404s an unmatched path - which is the part with behaviour in it
+#
+# The other half, "does the real table name the right services and paths", is asserted in
+# config-server's ConfigServerContractTest, where the real file is readable. Two tests, because the
+# two questions genuinely are different: one is about Gateway, the other is about our YAML.
+spring:
+  cloud:
+    config:
+      enabled: false
+    gateway:
+      server:
+        webflux:
+          routes:
+            - id: user-service
+              uri: ${test.backend.url}
+              predicates:
+                - Path=/api/auth/**,/api/users/**
+            - id: book-service
+              uri: ${test.backend.url}
+              predicates:
+                - Path=/api/books/**,/api/authors/**
+            - id: order-service
+              uri: ${test.backend.url}
+              predicates:
+                - Path=/api/orders/**
+
+logging:
+  level:
+    org.springframework.cloud.gateway: INFO
