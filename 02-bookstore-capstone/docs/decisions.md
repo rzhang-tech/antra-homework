@@ -142,6 +142,29 @@ single-developer project, and sequential numbers have a real advantage here — 
 
 ---
 
+## D9 — `LAZY` everywhere, fetched explicitly per query
+
+**Decision.** Every association is `FetchType.LAZY`. Queries that need an association say so —
+`@EntityGraph` for to-one, `LEFT JOIN FETCH` for to-many.
+
+**Why not `EAGER`.** `EAGER` is the reflex answer to N+1 and it is the wrong one. It means *always*
+join, including on every query that never touches the association, so it swaps N+1 for permanent
+over-fetching. It is also a global decision made at the entity, where there is no information about
+what any particular query needs. Fetching belongs to the query, not to the mapping.
+
+**Measured on this project.** `GET /api/authors` went from 6 queries to 1; `GET /api/books?size=5` from
+7 to 2. The `?naive=true` switch on the author endpoint keeps both paths reachable so the difference can
+be demonstrated live rather than claimed — useful for the required demo video.
+
+**The trap that comes with it.** A fetch join on a to-*many* association cannot be paginated in SQL:
+`LIMIT` applies to joined rows, not to root entities. Hibernate does not fail — it loads the whole
+result set and paginates in memory, with only a warning
+(`HHH90003004: firstResult/maxResults specified with collection fetch; applying in memory`). Correct on
+small data, an outage on large. Hence `findAllWithBooks()` returns a `List`. Where both are genuinely
+needed the answers are `@BatchSize` or a two-query split (page the ids, then fetch collections for them).
+
+---
+
 ## D5 — Cross-service references are plain IDs, not foreign keys
 
 **Decision.** `order_item.book_id` and `orders.user_id` are plain `BIGINT` columns with no FK constraint.

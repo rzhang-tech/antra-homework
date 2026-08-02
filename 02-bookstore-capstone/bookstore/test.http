@@ -102,3 +102,15 @@ DELETE {{host}}/api/books/5
 
 ### 12. Delete it again -> 404
 DELETE {{host}}/api/books/5
+
+### ---------------------------------------------------------------------------
+### Step 2c — the N+1 demonstration
+### Watch the application log with SQL logging on (dev profile) while running
+### these two. Identical responses, very different query counts.
+### ---------------------------------------------------------------------------
+
+### 13. Authors with their books — one LEFT JOIN FETCH -> 1 query
+GET {{host}}/api/authors
+
+### 14. The same data, the naive way -> 1 + N queries (6 with the seed data)
+GET {{host}}/api/authors?naive=true

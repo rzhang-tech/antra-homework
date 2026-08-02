@@ -229,7 +229,69 @@ select a1_0.id, a1_0.name from author a1_0 where a1_0.id=?    -- binding [3]
 Seven queries for five books: one for the page, one for the count, and **one per book** for the author.
 Ask for 100 books and it is 102 queries. Step 2c measures this properly and fixes it.
 
-## 2c–2e — still to do
+## 2c — the N+1 problem, reproduced and fixed ☑
 
-The N+1 problem, reproduced then fixed · a justified index plus `EXPLAIN ANALYZE` · `@Version`
-optimistic locking under concurrent writes.
+### Measured, not asserted
+
+`GET /api/authors?naive=true` deliberately takes the unoptimised path. Same data, same endpoint, one
+query parameter apart:
+
+| Request | Queries | What it does |
+|---------|---------|--------------|
+| `GET /api/authors?naive=true` | **6** | 1 for the authors + 1 per author for their books |
+| `GET /api/authors` | **1** | one `LEFT JOIN FETCH` |
+| `GET /api/books?size=5` | **2** (was 7) | page + count; the author now rides along on the join |
+| `GET /api/books/1` | **1** (was 2) | |
+
+Five authors makes it 6 versus 1. Five hundred authors makes it 501 versus 1 — and the code looks
+identical either way, which is what makes N+1 dangerous. Nothing in `AuthorResponseDto.from` says
+"query the database"; it just reads `author.getBooks()`.
+
+### The two fixes, and why they are different
+
+**Book → author (to-one): `@EntityGraph`.**
+
+```java
+@EntityGraph(attributePaths = "author")
+@Override
+Page<Book> findAll(Pageable pageable);
+```
+
+Declarative, composes with derived queries and with `Pageable`. Joining a to-one association cannot
+multiply rows, so `LIMIT`/`OFFSET` still counts books and paging stays correct.
+
+**Author → books (to-many): explicit `LEFT JOIN FETCH`.**
+
+```java
+@Query("SELECT DISTINCT a FROM Author a LEFT JOIN FETCH a.books ORDER BY a.id")
+List<Author> findAllWithBooks();
+```
+
+- `LEFT` so an author with no books still appears.
+- `DISTINCT` because the join multiplies rows — an author with three books returns three rows, and
+  without it Hibernate hands back the same `Author` three times. It de-duplicates the *entities*; the
+  database rows are still there.
+- **Returns a `List`, not a `Page`, on purpose.** Fetching a collection and paginating cannot both
+  happen in SQL: `LIMIT` would apply to joined rows, cutting an author's books in half. Hibernate
+  detects this and silently loads *every* row to paginate in memory, warning
+  `HHH90003004: firstResult/maxResults specified with collection fetch; applying in memory` — fine on
+  five authors, an outage on five hundred thousand. When you genuinely need both, use `@BatchSize` or
+  two queries (page the ids, then fetch collections for that page).
+
+### Why not just make it EAGER
+
+The reflex fix is `fetch = FetchType.EAGER`, and it is the wrong one. `EAGER` means *always* join —
+including on the many queries that never touch the association — so it trades N+1 for permanent
+over-fetching, and it interacts badly with paging. The correct shape is what is here: **`LAZY` by
+default, fetched explicitly by the queries that need it.** Per-query decision, not a global one.
+
+### A bug this exercise caught
+
+Comparing the naive and fetch-join responses byte for byte, they disagreed — same authors, same books,
+**different order**. Neither query had an `ORDER BY`, so PostgreSQL returned rows in whatever order suited
+it, and the two plans happened to differ. Both paths now order explicitly by id. A result set without
+`ORDER BY` has no guaranteed order, and "it looked sorted in testing" is not a contract.
+
+## 2d–2e — still to do
+
+A justified index plus `EXPLAIN ANALYZE` · `@Version` optimistic locking under concurrent writes.
