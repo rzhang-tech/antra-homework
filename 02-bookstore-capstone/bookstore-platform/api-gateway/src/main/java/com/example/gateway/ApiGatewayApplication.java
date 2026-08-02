@@ -1,7 +1,9 @@
 package com.example.gateway;
 
 import org.springframework.boot.SpringApplication;
+import com.example.gateway.config.JwtProperties;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
 /**
  * The platform's single front door.
@@ -34,6 +36,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * request tracing. All of them are properties of <em>the edge</em> rather than of any service.
  */
 @SpringBootApplication
+@EnableConfigurationProperties(JwtProperties.class)
 public class ApiGatewayApplication {
 
     public static void main(String[] args) {

@@ -38,3 +38,11 @@ spring:
 logging:
   level:
     org.springframework.cloud.gateway: INFO
+
+app:
+  jwt:
+    # Test-only. EdgeAuthenticationTest signs its tokens with this exact value, because the tests are
+    # about a GENUINE token being accepted and a forged one refused - signing with a different key
+    # would only prove that two different keys disagree.
+    secret: test-only-signing-key-not-used-anywhere-else-0123456789
+    issuer: bookstore

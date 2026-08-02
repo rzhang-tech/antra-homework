@@ -85,8 +85,13 @@ class RoutingTest {
     void forwardsTheCallersToken() {
         backend.stubFor(get(urlPathEqualTo("/api/orders")).willReturn(okJson("[]")));
 
+        // A genuine token, since Step 8b. This test used to send `Bearer a.b.c` and get 200 - the
+        // moment the edge filter appeared it started failing, which is the filter demonstrating it is
+        // actually in the request path rather than merely configured.
+        String token = TestTokens.customer();
+
         client.get().uri("/api/orders")
-                .header("Authorization", "Bearer a.b.c")
+                .header("Authorization", "Bearer " + token)
                 .exchange()
                 .expectStatus().isOk();
 
@@ -95,7 +100,7 @@ class RoutingTest {
         // accident: strip the token here and every downstream authorization rule starts seeing an
         // anonymous request.
         backend.verify(getRequestedFor(urlPathEqualTo("/api/orders"))
-                .withHeader("Authorization", equalTo("Bearer a.b.c")));
+                .withHeader("Authorization", equalTo("Bearer " + token)));
     }
 
     @Test
@@ -129,6 +134,7 @@ class RoutingTest {
                 .willReturn(aResponse().withStatus(409).withBody("{\"error\":\"Conflict\"}")));
 
         client.get().uri("/api/orders/999")
+                .header("Authorization", "Bearer " + TestTokens.customer())
                 .exchange()
                 .expectStatus().isEqualTo(409);
 
