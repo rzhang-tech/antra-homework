@@ -1,17 +1,47 @@
+# All that is left of book-service's configuration after Step 6.
+#
+# `application-dev.yml` and `application-prod.yml` are gone. The datasource, the port, the signing key,
+# the log levels and the Flyway locations are served by the config server now. What could not move is
+# the bootstrap paradox: a service cannot fetch its configuration until it knows its own name and the
+# address of the server holding it. Those two facts, and nothing else, ship inside the jar.
+#
+# The reasoning behind every setting below is in bookstore-platform/README.md, under Step 6. All four
+# services carry this block verbatim - which is duplication, and the right kind: it is the only
+# configuration that cannot come from the config server, so a copy per service is the floor, not a
+# smell.
+
 spring:
   application:
+    # The `{application}` in the config server's `/{application}/{profile}` lookup. Misspell it and
+    # this service silently receives only the shared `application.yml` - no datasource, no port - then
+    # fails on first use rather than at startup.
     name: book-service
   profiles:
     default: dev
-  jpa:
-    open-in-view: false
+  cloud:
+    config:
+      # Refuse to start rather than start wrong. A service that falls back to bundled defaults when the
+      # config server is unreachable comes up holding last release's signing key and reports itself
+      # healthy; one that will not start is merely broken, and loudly.
+      fail-fast: true
+      retry:
+        # Fail-fast is not fail-instantly: on a cold start the config server may be seconds behind.
+        # Measured with the server unreachable - 4.5 s with retry off, 31.2 s with these settings.
+        # (The startup log makes the backoff look absent because config data is loaded before logging
+        # exists and replays in a burst. Trust the wall clock, not those timestamps.)
+        max-attempts: 6
+        initial-interval: 1000
+        multiplier: 1.5
+        max-interval: 8000
 
-server:
-  port: 8082
-  error:
-    include-stacktrace: never
-
-app:
-  jwt:
-    expiration-minutes: 60
-    issuer: bookstore
+---
+# Skipped when the `test` profile is active. A test that reaches out to a config server is not testing
+# this service: it fails whenever a server on somebody's laptop is down, and the suite could not run in
+# CI without standing up a second process. Tests configure themselves from `application-test.yml`.
+spring:
+  config:
+    activate:
+      on-profile: "!test"
+    # NOT `optional:`. An optional import would let this service start with no datasource, no port and
+    # no signing key, then fail somewhere far from the cause.
+    import: configserver:${CONFIG_SERVER_URL:http://localhost:8888}

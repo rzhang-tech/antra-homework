@@ -1,0 +1,9 @@
+# book-service, local development. Owns `bookdb` and has credentials for no other.
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5434/bookdb
+    username: bookdb
+    password: bookdb
+  flyway:
+    locations: classpath:db/migration,classpath:db/seed

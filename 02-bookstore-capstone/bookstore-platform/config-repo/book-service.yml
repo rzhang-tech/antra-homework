@@ -1,0 +1,4 @@
+# book-service, all profiles.
+
+server:
+  port: 8082

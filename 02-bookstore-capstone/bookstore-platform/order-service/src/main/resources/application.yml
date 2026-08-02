@@ -1,112 +1,47 @@
+# All that is left of order-service's configuration after Step 6.
+#
+# `application-dev.yml` and `application-prod.yml` are gone. The datasource, the port, the signing key,
+# the log levels and the Flyway locations are served by the config server now. What could not move is
+# the bootstrap paradox: a service cannot fetch its configuration until it knows its own name and the
+# address of the server holding it. Those two facts, and nothing else, ship inside the jar.
+#
+# The reasoning behind every setting below is in bookstore-platform/README.md, under Step 6. All four
+# services carry this block verbatim - which is duplication, and the right kind: it is the only
+# configuration that cannot come from the config server, so a copy per service is the floor, not a
+# smell.
+
 spring:
   application:
+    # The `{application}` in the config server's `/{application}/{profile}` lookup. Misspell it and
+    # this service silently receives only the shared `application.yml` - no datasource, no port - then
+    # fails on first use rather than at startup.
     name: order-service
   profiles:
     default: dev
-  jpa:
-    open-in-view: false
+  cloud:
+    config:
+      # Refuse to start rather than start wrong. A service that falls back to bundled defaults when the
+      # config server is unreachable comes up holding last release's signing key and reports itself
+      # healthy; one that will not start is merely broken, and loudly.
+      fail-fast: true
+      retry:
+        # Fail-fast is not fail-instantly: on a cold start the config server may be seconds behind.
+        # Measured with the server unreachable - 4.5 s with retry off, 31.2 s with these settings.
+        # (The startup log makes the backoff look absent because config data is loaded before logging
+        # exists and replays in a burst. Trust the wall clock, not those timestamps.)
+        max-attempts: 6
+        initial-interval: 1000
+        multiplier: 1.5
+        max-interval: 8000
 
-server:
-  port: 8083
-  error:
-    include-stacktrace: never
-
-app:
-  jwt:
-    expiration-minutes: 60
-    issuer: bookstore
-  saga:
-    # How long an order may sit in PENDING before recovery presumes its orchestrator died. Comfortably
-    # longer than the worst honest case (every Feign timeout plus retries, several times over): unwinding
-    # an order that was merely slow is a self-inflicted outage, and being slow to reclaim stock is not.
-    pending-timeout: PT2M
-    recovery-interval-ms: 30000
-
-resilience4j:
-  # Aspect order, which the default gets backwards for this use case.
-  #
-  # Resilience4j nests Retry OUTSIDE CircuitBreaker by default. Two things go wrong with that here:
-  # one retried call records three separate failures against the breaker, and — worse — when the
-  # breaker is open its refusal travels out to Retry, which retries it through the full backoff.
-  # "Fail fast" measured 619 ms.
-  #
-  # Spring's Ordered convention is that a LOWER number runs first, and therefore sits further OUT.
-  # (Guessing it the other way round produced a build that looked configured and behaved exactly as
-  # before — the failing test was the only thing that noticed.)
-  #
-  # CircuitBreaker 1, Retry 2 gives CircuitBreaker(Retry(call)): three attempts count as one failure,
-  # and an open circuit refuses in microseconds with no retry in the path.
-  circuitbreaker:
-    circuit-breaker-aspect-order: 1
-    instances:
-      catalog:
-        # Decide on the last 10 calls rather than on a time window: a low-traffic service would
-        # otherwise take minutes to accumulate enough evidence to react.
-        sliding-window-type: COUNT_BASED
-        sliding-window-size: 10
-
-        # Never open on the first failure. Two failures out of two is 100% and means almost nothing;
-        # this waits for five calls before the rate is allowed to trip anything.
-        minimum-number-of-calls: 5
-
-        # Half the calls failing is not a blip — it is an outage. Lower would flap on ordinary noise.
-        failure-rate-threshold: 50
-
-        # How long to stay open before testing the water again. Long enough for a pod to restart,
-        # short enough that recovery is not noticeably delayed.
-        wait-duration-in-open-state: 10s
-
-        # HALF_OPEN lets exactly three probes through. If they pass the circuit closes; if they fail it
-        # opens again for another 10s. This is what stops a recovering service being flattened by the
-        # full backlog the instant it answers one request.
-        permitted-number-of-calls-in-half-open-state: 3
-        automatic-transition-from-open-to-half-open-enabled: true
-
-        # A slow call is a failure even when it eventually succeeds — waiting 3s for a book is an
-        # outage from the customer's point of view, and holds a thread the whole time.
-        slow-call-duration-threshold: 2s
-        slow-call-rate-threshold: 50
-
-        # THE IMPORTANT ONE. These are book-service answering correctly, not failing:
-        # "no such book" (404) and "not enough stock" (409) are valid outcomes of a valid request.
-        # Counting them would open the circuit under entirely healthy traffic — customers asking for
-        # books that do not exist would take the catalog "down".
-        ignore-exceptions:
-          - com.example.order.exception.ResourceNotFoundException
-          - com.example.order.exception.OrderNotAllowedException
-
-        register-health-indicator: true
-
-  retry:
-    retry-aspect-order: 2
-    instances:
-      catalog:
-        # Three attempts total, not three retries. Beyond that a "transient" failure is not transient,
-        # and retrying harder is how a struggling service gets finished off.
-        max-attempts: 3
-
-        # Backoff, not a tight loop: 200ms, then 400ms. Without the multiplier, every caller retries in
-        # lockstep and delivers a second thundering herd exactly when the service is weakest.
-        wait-duration: 200ms
-        enable-exponential-backoff: true
-        exponential-backoff-multiplier: 2
-
-        # Same exclusions. Retrying a 404 three times produces the same 404 three times, slower.
-        ignore-exceptions:
-          - com.example.order.exception.ResourceNotFoundException
-          - com.example.order.exception.OrderNotAllowedException
-
-
-management:
-  endpoints:
-    web:
-      exposure:
-        # Circuit state has to be observable. A breaker whose state nobody can see turns an outage into
-        # a mystery — "it started working again on its own" is not an incident report.
-        include: health,circuitbreakers,circuitbreakerevents,metrics
-  endpoint:
-    health:
-      show-details: always
-  health:
-    circuitbreakers:
-      enabled: true
+---
+# Skipped when the `test` profile is active. A test that reaches out to a config server is not testing
+# this service: it fails whenever a server on somebody's laptop is down, and the suite could not run in
+# CI without standing up a second process. Tests configure themselves from `application-test.yml`.
+spring:
+  config:
+    activate:
+      on-profile: "!test"
+    # NOT `optional:`. An optional import would let this service start with no datasource, no port and
+    # no signing key, then fail somewhere far from the cause.
+    import: configserver:${CONFIG_SERVER_URL:http://localhost:8888}

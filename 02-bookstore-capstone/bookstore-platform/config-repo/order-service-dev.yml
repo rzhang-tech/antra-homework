@@ -1,0 +1,19 @@
+# order-service, local development. Owns `orderdb`.
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5435/orderdb
+    username: orderdb
+    password: orderdb
+  flyway:
+    locations: classpath:db/migration
+
+app:
+  book-service:
+    url: http://localhost:8082
+
+logging:
+  level:
+    # Logs each outgoing Feign call and its status - the first thing to look at when a cross-service
+    # call misbehaves.
+    com.example.order.client.BookClient: DEBUG

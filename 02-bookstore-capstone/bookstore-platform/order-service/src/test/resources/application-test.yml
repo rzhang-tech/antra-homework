@@ -2,8 +2,22 @@
 #
 # No datasource block: Testcontainers supplies one at runtime through @ServiceConnection, and hard-coding
 # a URL here is exactly the coupling to a hand-started database that Testcontainers removes.
+#
+# From Step 6 this file is also why the tests need no config server. Two separate mechanisms, both
+# required. The `on-profile: "!test"` guard in the main application.yml stops the *fetch* - config-data
+# imports resolve in an early phase, before this file is visible, so disabling the client here could
+# not have prevented it. The flag below stops the *check*: spring-cloud-starter-config refuses to start
+# a context that has the starter on the classpath and no `spring.config.import`. That check earns its
+# keep in production, where what it catches is a service quietly running on bundled defaults.
+#
+# The consequence is that this file duplicates a few values the config repo also defines. Deliberate:
+# the alternative is a test suite that cannot run unless another process is up.
 spring:
+  cloud:
+    config:
+      enabled: false
   jpa:
+    open-in-view: false
     hibernate:
       ddl-auto: validate
     show-sql: false
@@ -19,6 +33,49 @@ app:
     secret: test-only-signing-key-not-used-anywhere-else-0123456789
     expiration-minutes: 60
     issuer: bookstore
+
+resilience4j:
+  # Pinned here, not read from the config repo, and that is the point rather than a workaround.
+  #
+  # Before Step 6 these thresholds lived in `src/main/resources/application.yml`, which is on the test
+  # classpath - so CatalogGatewayResilienceTest silently inherited production's numbers. Moving them to
+  # the config server removed that inheritance and the test started failing: with Resilience4j's
+  # defaults (a 100-call window, 100 calls minimum) the circuit never opens, so "opens after five calls
+  # at 60% failure" could not hold.
+  #
+  # Restoring the values here rather than pointing the test at the config server is the correct fix.
+  # A test that asserts "the circuit opens on the sixth call" and reads whatever operations has
+  # currently tuned is not a test - it changes meaning, or breaks, whenever someone adjusts a threshold
+  # for entirely good reasons. The test owns the numbers it asserts on; the config repo owns the
+  # numbers production runs on; they start out equal and are allowed to diverge.
+  circuitbreaker:
+    circuit-breaker-aspect-order: 1
+    instances:
+      catalog:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        slow-call-duration-threshold: 2s
+        slow-call-rate-threshold: 50
+        register-health-indicator: true
+        ignore-exceptions:
+          - com.example.order.exception.ResourceNotFoundException
+          - com.example.order.exception.OrderNotAllowedException
+  retry:
+    retry-aspect-order: 2
+    instances:
+      catalog:
+        max-attempts: 3
+        wait-duration: 200ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        ignore-exceptions:
+          - com.example.order.exception.ResourceNotFoundException
+          - com.example.order.exception.OrderNotAllowedException
 
 logging:
   level:

@@ -1,0 +1,13 @@
+# payment-service, local development. Owns `paymentdb`.
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5436/paymentdb
+    username: paymentdb
+    password: paymentdb
+  flyway:
+    locations: classpath:db/migration
+
+app:
+  order-service:
+    url: http://localhost:8083

@@ -23,6 +23,26 @@ spring:
     # hides N+1 queries behind the view layer instead of failing where the query belongs.
     open-in-view: false
 
+  cloud:
+    openfeign:
+      client:
+        config:
+          default:
+            # A BUG THIS STEP FOUND. These lived in order-service's and payment-service's
+            # `application-dev.yml`, and in neither `application-prod.yml`. Production was therefore
+            # running on Feign's defaults, which are effectively "wait forever" - the exact failure
+            # mode Step 5b added them to prevent, disabled in the only environment where it matters.
+            #
+            # Nothing caught it for two sub-steps because no one file showed both profiles side by
+            # side. Pulling four services' configuration into one directory is what made it visible,
+            # which is a better argument for a config server than "less duplication".
+            #
+            # They belong here, unqualified by profile: how long a caller is willing to be blocked is a
+            # promise about this platform, not a property of a developer's laptop.
+            connect-timeout: 2000    # ms to establish a TCP connection
+            read-timeout: 3000       # ms to wait for a response once connected
+            logger-level: basic
+
 server:
   error:
     # A stack trace in an error response tells an attacker the framework, the version and the package
@@ -52,3 +72,26 @@ management:
   endpoint:
     health:
       show-details: always
+
+resilience4j:
+  # Aspect ordering is platform policy, so it is stated once. The per-instance thresholds are not -
+  # those live with the service that owns the dependency being guarded.
+  #
+  # Resilience4j nests Retry OUTSIDE CircuitBreaker by default. Two things go wrong with that: one
+  # retried call records three separate failures against the breaker, and - worse - when the breaker is
+  # open its refusal travels out to Retry, which retries being told no through the full backoff.
+  # "Fail fast" measured 619 ms.
+  #
+  # Spring's Ordered convention is that a LOWER number runs first, and therefore sits further OUT.
+  # (Guessing it the other way round produced a build that looked configured and behaved exactly as
+  # before - the failing test was the only thing that noticed.)
+  #
+  # CircuitBreaker 1, Retry 2 gives CircuitBreaker(Retry(call)): three attempts count as one failure,
+  # and an open circuit refuses in microseconds with no retry in the path.
+  #
+  # Inert in user-service and book-service, which have no Resilience4j on the classpath. An unused
+  # property costs nothing; a platform rule discovered independently by each service costs a lot.
+  circuitbreaker:
+    circuit-breaker-aspect-order: 1
+  retry:
+    retry-aspect-order: 2

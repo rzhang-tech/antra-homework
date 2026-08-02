@@ -1,0 +1,9 @@
+# book-service, production.
+
+spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+  flyway:
+    locations: classpath:db/migration

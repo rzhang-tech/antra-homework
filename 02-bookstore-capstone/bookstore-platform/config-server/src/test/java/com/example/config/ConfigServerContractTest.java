@@ -58,6 +58,51 @@ class ConfigServerContractTest {
     }
 
     @Test
+    @DisplayName("centralising configuration does not soften Database-per-Service")
+    void noServiceIsEverSentAnotherServicesCredentials() {
+        // The obvious worry about a config server is that it becomes a place where every service's
+        // secrets sit together, one lookup away from each other. It does hold all four datasource
+        // blocks - but it answers only for the application name that asked, so the isolation Step 5a
+        // built out of separate ports and separate passwords survives intact.
+        record Service(String name, String database, int port) {}
+
+        List<Service> services = List.of(
+                new Service("user-service", "userdb", 5433),
+                new Service("book-service", "bookdb", 5434),
+                new Service("order-service", "orderdb", 5435),
+                new Service("payment-service", "paymentdb", 5436));
+
+        for (Service service : services) {
+            ObjectNode config = mergedSourceFor("/" + service.name() + "/dev");
+            String url = config.path("spring.datasource.url").asText();
+
+            assertThat(url).contains(service.port() + "/" + service.database());
+            assertThat(config.path("spring.datasource.username").asText()).isEqualTo(service.database());
+
+            for (Service other : services) {
+                if (!other.equals(service)) {
+                    assertThat(url).doesNotContain(other.database());
+                }
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("all four services are handed the same signing key")
+    void theKeyEveryServiceMustAgreeOnIsOneValue() {
+        // The duplication Step 6 exists to remove: four byte-identical copies of this literal, which
+        // nothing enforced. If they ever drifted, user-service would mint tokens the other three
+        // rejected - and the symptom would be 401s, not a configuration error.
+        List<String> keys = List.of("user-service", "book-service", "order-service", "payment-service")
+                .stream()
+                .map(name -> mergedSourceFor("/" + name + "/dev").path("app.jwt.secret").asText())
+                .toList();
+
+        assertThat(keys).doesNotContain("").hasSize(4);
+        assertThat(keys).containsOnly(keys.getFirst());
+    }
+
+    @Test
     @DisplayName("an unknown application gets the shared defaults, not an error")
     void unknownApplicationFallsBackToSharedFilesOnly() {
         // Config Server answers 200 with whatever matches, so a typo in spring.application.name does
