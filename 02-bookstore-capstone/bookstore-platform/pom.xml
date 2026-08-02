@@ -27,6 +27,8 @@
       coupling the split was meant to remove. See D12.
     -->
     <modules>
+        <!-- First, because from Step 6 every other service refuses to start without it. -->
+        <module>config-server</module>
         <module>user-service</module>
         <module>book-service</module>
         <module>order-service</module>

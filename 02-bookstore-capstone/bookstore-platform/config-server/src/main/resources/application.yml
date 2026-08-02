@@ -1,0 +1,68 @@
+spring:
+  application:
+    name: config-server
+
+  # NATIVE, not git, for local development - and this is a real trade-off, not a shortcut.
+  #
+  #   native  reads the working directory. Edit a file, restart or refresh, done. No history: the
+  #           audit trail is whatever the surrounding Git repository happens to record.
+  #   git     clones a repository and serves committed content only. Every change is a commit with an
+  #           author and a timestamp, and a bad value can be reverted like any other line of code.
+  #
+  # The git backend is the one that satisfies "one place to change AND audit configuration", so it is
+  # what production uses - see the `git` profile below. Locally it means an uncommitted edit is simply
+  # not served, which turns a two-second experiment into a commit, and Step 6c involves a lot of
+  # experimenting. Both are configured; the default is the one that suits the phase of work.
+  profiles:
+    active: native
+
+  cloud:
+    config:
+      server:
+        native:
+          # Relative to the working directory, which the documented run command
+          # (`cd config-server && ../mvnw spring-boot:run`) makes `bookstore-platform/config-server`.
+          # Override CONFIG_REPO when running the jar from anywhere else.
+          search-locations: ${CONFIG_REPO:file:../config-repo}
+
+server:
+  port: 8888
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # /actuator/health is what Step 10's readiness probe will call, and what tells you the
+        # difference between "the config server is down" and "the config server has no such file".
+        include: health,env
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.example: DEBUG
+
+---
+# Production: serve committed configuration only.
+#
+# `file:` here because the config repo currently lives inside this project's own Git repository. In a
+# real deployment the URI is an https:// remote with a deploy key, and the config lives in a repository
+# separate from the code - a config change should not require a code review from the service team, and
+# a code change should not be able to alter production configuration silently.
+spring:
+  config:
+    activate:
+      on-profile: git
+  cloud:
+    config:
+      server:
+        git:
+          uri: ${CONFIG_REPO_URI:file:../../..}
+          search-paths: 02-bookstore-capstone/bookstore-platform/config-repo
+          default-label: main
+          # Re-clone on every request rather than serving a stale working copy. Slower, and correct:
+          # a config server that hands out yesterday's values is worse than one that is simply down,
+          # because nothing looks wrong.
+          force-pull: true
+          clone-on-start: true

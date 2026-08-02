@@ -1,0 +1,4 @@
+# user-service, all profiles.
+
+server:
+  port: 8081

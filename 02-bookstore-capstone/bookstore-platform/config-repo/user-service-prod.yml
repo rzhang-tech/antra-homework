@@ -1,0 +1,11 @@
+# user-service, production.
+
+spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+  flyway:
+    # No `db/seed`. Demo rows in production is not a hypothetical mistake - it is what happens when
+    # dev and prod share a Flyway location list.
+    locations: classpath:db/migration

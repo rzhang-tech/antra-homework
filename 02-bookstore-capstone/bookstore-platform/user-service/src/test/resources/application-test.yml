@@ -2,8 +2,29 @@
 #
 # No datasource block: Testcontainers supplies one at runtime through @ServiceConnection, and hard-coding
 # a URL here is exactly the coupling to a hand-started database that Testcontainers removes.
+#
+# From Step 6 this file is also the reason the tests do not need a config server. The `configserver:`
+# import in the main `application.yml` is guarded by `on-profile: "!test"`, so nothing here is fetched
+# over the network and the values below stand alone. That means this file duplicates a handful of
+# settings the config repo also defines - deliberately. The alternative, a test suite that cannot run
+# unless another process is up, trades a real dependency for a cosmetic one.
 spring:
+  cloud:
+    config:
+      # Two separate mechanisms, both needed, and the reason is worth knowing.
+      #
+      # The `on-profile: "!test"` guard in the main application.yml stops the *fetch*: config-data
+      # imports are resolved in an early phase, before this file's properties are visible, so
+      # disabling the client here could not have prevented it.
+      #
+      # This flag stops the *check*. spring-cloud-starter-config refuses to start a context that has
+      # the starter on the classpath but no `spring.config.import` - "No spring.config.import property
+      # has been defined". That check earns its keep in production, where the failure it catches is a
+      # service quietly running on bundled defaults. Here there is genuinely no config server, so it
+      # has to be told so explicitly rather than silenced by accident.
+      enabled: false
   jpa:
+    open-in-view: false
     hibernate:
       ddl-auto: validate
     show-sql: false

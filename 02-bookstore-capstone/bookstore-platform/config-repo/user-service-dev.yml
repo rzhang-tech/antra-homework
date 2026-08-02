@@ -1,0 +1,14 @@
+# user-service, local development.
+#
+# This service owns database `userdb` and has credentials for no other. Centralising configuration does
+# not soften the Database-per-Service boundary: the config server holds four *separate* datasource
+# blocks, and no service is ever sent another service's credentials. It only ever answers for the
+# application name that asked.
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5433/userdb
+    username: userdb
+    password: userdb
+  flyway:
+    locations: classpath:db/migration,classpath:db/seed

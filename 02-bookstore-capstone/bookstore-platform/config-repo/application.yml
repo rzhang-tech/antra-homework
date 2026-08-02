@@ -1,0 +1,54 @@
+# Shared by EVERY service, in every profile.
+#
+# Config Server resolves a request for {application}/{profile} into an ordered list of property
+# sources. The order is NOT "most specific service file first" - profile beats specificity:
+#
+#   user-service-dev.yml   >   application-dev.yml   >   user-service.yml   >   application.yml
+#
+# Read the middle two again. A platform-wide *profile* file outranks a *service-specific* one, so a
+# value put in `application-dev.yml` silently overrides the same key in `user-service.yml`, and the
+# service file looks ignored. Verified against the running server, not assumed - see
+# ConfigServerContractTest, which exists because the intuitive order is the wrong one.
+#
+# The practical rule that follows: if a service needs to override something, override it at the same
+# profile level or lower. `user-service-dev.yml` beats everything.
+#
+# Nothing is merged by textual inclusion; the client receives all four as separate property sources and
+# Spring's normal precedence rules apply.
+
+spring:
+  jpa:
+    # Off everywhere, deliberately. Open-in-view keeps a database connection held for the whole
+    # request so that a lazily-loaded association still works while the JSON is being written - which
+    # hides N+1 queries behind the view layer instead of failing where the query belongs.
+    open-in-view: false
+
+server:
+  error:
+    # A stack trace in an error response tells an attacker the framework, the version and the package
+    # layout. It belongs in the log, where it already is.
+    include-stacktrace: never
+
+app:
+  jwt:
+    # These two were identical in four services because they describe the *token format*, and every
+    # service on the platform has to agree on it or nothing verifies. That is the definition of
+    # platform-wide configuration, and it took a config server to have somewhere to put it.
+    expiration-minutes: 60
+    issuer: bookstore
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # `refresh` is what makes Step 6c possible - a POST to it re-fetches from this server and
+        # rebinds the beans that can be rebound. `env` is how you prove it worked.
+        #
+        # Both are internal endpoints. Actuator redacts values whose key looks like a credential
+        # (`app.jwt.secret` matches), but /actuator/env still discloses the full shape of the
+        # configuration, and /actuator/refresh is a POST that changes a running process. Step 8's
+        # gateway routes no /actuator/** from outside; until then these are localhost-only in practice.
+        include: health,info,refresh,env,metrics
+  endpoint:
+    health:
+      show-details: always

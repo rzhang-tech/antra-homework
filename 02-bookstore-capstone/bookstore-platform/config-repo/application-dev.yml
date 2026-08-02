@@ -1,0 +1,30 @@
+# Local development, shared by every service.
+
+spring:
+  jpa:
+    hibernate:
+      # Flyway owns the schema. Hibernate's job is to check that the entities still match it and to
+      # refuse to start if they do not - never to change it.
+      ddl-auto: validate
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+app:
+  jwt:
+    # THE VALUE THIS WHOLE STEP EXISTS FOR.
+    #
+    # Before Step 6 this literal appeared in four files. user-service signs with it and the other three
+    # verify with it, so the four copies had to stay byte-identical forever - and nothing enforced that.
+    # Rotating it meant four edits and four restarts, with a window in the middle where tokens minted by
+    # the new key were rejected by services still holding the old one.
+    #
+    # It is one copy now. It is still plain text, which is a different problem and is Step 6d's.
+    #
+    # DEV ONLY.
+    secret: w4HvWMieqVUX1LJpx/wVR+yANNMPgD/dwfEySBsQuZyr7nej+tEV7aZkrzB12Ip3
+
+logging:
+  level:
+    com.example: DEBUG

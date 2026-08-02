@@ -35,6 +35,26 @@
             <artifactId>spring-boot-starter-security</artifactId>
         </dependency>
 
+        <!--
+          The client half of Step 6. It contributes a `configserver:` handler for
+          `spring.config.import`, so configuration is fetched during the config-data phase - before any
+          bean is created and before @ConfigurationProperties binds. By the time the application context
+          starts there is no difference between a value from this jar and a value from the server.
+        -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-config</artifactId>
+        </dependency>
+        <!--
+          Required by `spring.cloud.config.retry.*`. Without it fail-fast means "die on the first
+          refused connection", which loses to a config server that is merely thirty seconds behind this
+          one in a restart - a race that Step 10's orchestration makes routine.
+        -->
+        <dependency>
+            <groupId>org.springframework.retry</groupId>
+            <artifactId>spring-retry</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>

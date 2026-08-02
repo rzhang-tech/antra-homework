@@ -1,0 +1,22 @@
+# Production, shared by every service.
+#
+# `${...}` placeholders are NOT resolved by the config server. It serves the literal string
+# `${JWT_SECRET}` and the client resolves it against its own environment - so the secret never travels
+# over the wire, never sits in the config repository, and never appears in the server's logs. The
+# config server is told the *name* of the secret, not the secret.
+
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+
+app:
+  jwt:
+    # No default value on purpose. A service that silently falls back to a known signing key accepts
+    # forged tokens; one that refuses to start is merely broken, and loudly.
+    secret: ${JWT_SECRET}
+
+logging:
+  level:
+    com.example: INFO
