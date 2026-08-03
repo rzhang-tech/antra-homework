@@ -151,7 +151,13 @@ class ConfigServerContractTest {
             assertThat(placeholder).startsWith("${app.services.").endsWith(".url}");
 
             String key = placeholder.substring(2, placeholder.length() - 1);
-            assertThat(routes.path(key).asText()).endsWith(":" + route.address());
+
+            // `contains`, not `endsWith`. Since 10b the value is itself a placeholder with a default -
+            // `${USER_SERVICE_URL:http://localhost:8081}` - because the dev profile now also runs as a
+            // set of containers, where every laptop address is wrong. What is still worth pinning is
+            // that the default sends this route to the port that service actually listens on: a route
+            // table that compiles and points at the wrong service is the failure this test exists for.
+            assertThat(routes.path(key).asText()).contains(":" + route.address());
         }
 
         // Index order is asserted along with the contents, because Gateway takes the first predicate

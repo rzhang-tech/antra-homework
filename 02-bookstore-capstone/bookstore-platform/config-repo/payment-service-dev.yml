@@ -2,7 +2,7 @@
 
 spring:
   datasource:
-    url: jdbc:postgresql://localhost:5436/paymentdb
+    url: ${DB_URL:jdbc:postgresql://localhost:5436/paymentdb}
     username: paymentdb
     password: paymentdb
   flyway:
@@ -10,4 +10,4 @@ spring:
 
 app:
   order-service:
-    url: http://localhost:8083
+    url: ${ORDER_SERVICE_URL:http://localhost:8083}

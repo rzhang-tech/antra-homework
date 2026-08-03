@@ -2,14 +2,24 @@
 
 app:
   services:
-    # Addresses, because everything runs on one laptop. Step 10 replaces each of these with a
-    # Kubernetes service name and nothing else in this file changes - which is the reason they are
-    # placeholders in the route definitions rather than literals.
+    # `${VAR:default}` - overridable, with the laptop's address as the fallback. Step 10b made "dev"
+    # stop meaning "on a laptop": the same profile now also runs as eight containers, where every one
+    # of these hosts is wrong, because inside a container `localhost` is the container.
+    #
+    # The default keeps `../mvnw spring-boot:run` working with no environment set at all, and compose
+    # supplies USER_SERVICE_URL=http://user-service:8081 and so on. The route table above never
+    # mentions an address - it was already written against these placeholders - so the whole change is
+    # in this file.
+    #
+    # An env var would have overridden these without the `${}`, because OS environment variables
+    # outrank config-server data in Spring's precedence order. That would work and is not done: the
+    # config repo would still read `http://localhost:8081` while production ran somewhere else, and
+    # nothing in the file would say it was overridable. See Step 10b.
     user:
-      url: http://localhost:8081
+      url: ${USER_SERVICE_URL:http://localhost:8081}
     book:
-      url: http://localhost:8082
+      url: ${BOOK_SERVICE_URL:http://localhost:8082}
     order:
-      url: http://localhost:8083
+      url: ${ORDER_SERVICE_URL:http://localhost:8083}
     payment:
-      url: http://localhost:8084
+      url: ${PAYMENT_SERVICE_URL:http://localhost:8084}

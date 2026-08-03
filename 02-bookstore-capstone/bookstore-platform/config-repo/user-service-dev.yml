@@ -7,7 +7,15 @@
 
 spring:
   datasource:
-    url: jdbc:postgresql://localhost:5433/userdb
+    # Overridable, with the laptop's address as the default - the same idiom the four `*-prod.yml`
+    # files have used since Step 6d, minus the requirement to set it. Step 10b needed it because a
+    # container reaching `localhost:5433` reaches itself; compose supplies
+    # DB_URL=jdbc:postgresql://user-db:5432/userdb and 10c supplies it from a ConfigMap.
+    #
+    # Only the host and port vary. The credentials do not, because they are this database's
+    # credentials wherever it runs, and a service that could be handed a different username is a
+    # service that could be pointed at another service's database.
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/userdb}
     username: userdb
     password: userdb
   flyway:

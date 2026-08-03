@@ -22,17 +22,36 @@ git checkout step-4-monolith
 
 ## Run it
 
+Since 10b, all of it — eight services, four PostgreSQL instances and a Kafka broker — is one command
+from `02-bookstore-capstone/`:
+
 ```bash
 docker compose up -d
 ```
 
-(from `02-bookstore-capstone/` — starts **four** PostgreSQL instances and a Kafka broker)
+**34 seconds to thirteen healthy containers**, in dependency order, with no terminal count involved.
+The only published port is **8080**; everything else is reachable on the compose network and nowhere
+else, which is the promise Step 8 made and 10b keeps.
 
-Since 10a each service also has an image, though nothing yet starts them as a stack:
+```bash
+docker compose ps
+```
+
+```bash
+docker compose down
+```
+
+Images are built on first use. To build them without starting anything, or to tag a release:
 
 ```bash
 ./scripts/build-images.sh
 ```
+
+---
+
+Everything below is the original workflow — eight terminals, in this order — and it still works,
+unchanged, because 10b added overridable defaults rather than replacing addresses. Use it when you want
+a debugger attached to one service.
 
 **The config server starts first, and the other four will not start without it.** That is deliberate —
 see Step 6a — and it needs the encryption key, or the dev signing key in the repo cannot be decrypted:
@@ -1734,3 +1753,198 @@ service then carries. A service owns its own build (D29).
   different tomorrow. Step 11 tags by commit SHA and this becomes a convenience alias.
 - **Nothing runs yet.** Eight images that each start, fail to reach a config server on `localhost`, and
   exit. That is 10b.
+
+---
+
+# Step 10b — one command, and the three things that were written from a laptop's point of view
+
+Eight terminals, started in an order that mattered, became:
+
+```bash
+docker compose up -d
+```
+
+**34 seconds to 13/13 healthy**, measured from a full `docker compose down`. Register, browse, order,
+pay and both event consumers all work through the one published port.
+
+## Only 8080 is published, and that is the point
+
+Step 8 ended with a promise: *"In Step 10 a NetworkPolicy makes this the only way in for real."* Here
+it is kept, and it needed no rule — only the absence of seven `ports:` lines.
+
+```
+from the host          8080 -> 200      8081, 8082, 8083, 8084, 8888, 9090 -> connection refused
+from inside            order-service -> http://book-service:8082/api/books      200
+                       api-gateway   -> http://localhost:9090/actuator/health   200
+```
+
+The services still verify every token themselves. Nothing about the trust model changed, and that is
+deliberate: Step 8b's argument was that **a network boundary is not a security boundary until
+something makes it one**, and compose networking is not that something. What this buys is that
+bypassing the gateway stopped being something an outside client can *choose* to do.
+
+The gateway's management port is the sharpest case. 9090 exists because Step 8c found
+`/actuator/env` answering 200 on the internet-facing component. Not publishing it is the same
+guarantee with nothing left to configure wrong.
+
+## Kafka's advertised listeners, which is where a day goes
+
+A Kafka client does not keep talking to the address it dialled. It bootstraps, and the broker replies
+with metadata naming the address to use from then on — `advertised.listeners`. The old configuration
+advertised `localhost:9092`, so a service in a container would connect to `kafka:9092` perfectly, be
+told "the leader is at localhost:9092", reconnect **to itself**, and fail. A successful connection
+followed by a timeout sends everybody to look at the network.
+
+Two listeners, each advertised with the address that is true from where its caller sits:
+
+```
+INTERNAL   kafka:29092        the eight containers
+HOST       localhost:9092     a service started with ../mvnw on the laptop
+```
+
+The laptop keeps 9092 on purpose. `KAFKA_BOOTSTRAP_SERVERS` defaults to `localhost:9092` in the config
+repo and every CLI example in `test-platform.http` says 9092 — **giving the containers the new port
+rather than the humans is the change that breaks nothing.** Verified from the broker, with both
+consumers on container IPs and no lag:
+
+```
+analytics-service     bookstore.order.placed       partition 0  offset 1/1  lag 0  /172.21.0.12
+notification-service  bookstore.payment.completed  partition 0  offset 1/1  lag 0  /172.21.0.11
+```
+
+## "dev" stopped meaning "on a laptop"
+
+Every address in the dev profile was written from one machine's point of view, and inside a container
+every one of them is wrong, because `localhost` is the container. Five files changed, all the same way:
+
+```yaml
+url: ${DB_URL:jdbc:postgresql://localhost:5433/userdb}
+```
+
+Overridable, with the laptop as the default — the idiom the four `*-prod.yml` files have used since
+6d, minus the requirement to set it. The eight-terminal workflow needs no environment at all and is
+untouched; compose supplies `DB_URL=jdbc:postgresql://user-db:5432/userdb`; 10c supplies the same
+variable from a ConfigMap. The gateway's route table needed no edit whatsoever — it was already
+written against `${app.services.*.url}` placeholders rather than addresses.
+
+**The alternative was to change nothing**, because OS environment variables outrank config-server data
+in Spring's precedence order: `SPRING_DATASOURCE_URL` in compose would simply have won. It is not done,
+and the reason is the one this project keeps arriving at — the config repo would still read
+`localhost:5433` while every real deployment ran somewhere else, and **nothing in the file would say it
+was overridable**. Step 6's own "what got worse" already lists *"where does this value come from?"* as
+the cost of a config server; silent overrides are that cost, doubled. See D31.
+
+Only host and port vary. Credentials do not: they are that database's credentials wherever it runs, and
+a service that can be handed a different username is a service that can be pointed at another service's
+database.
+
+## The bug the first bring-up found, in two halves
+
+Four services died on `Connection to localhost:5433 refused` **with a correct `DB_URL` sitting in their
+environment, unread**, because nothing was asking for it.
+
+10a had baked `config-repo/` into the config-server image. The image was built before the placeholders
+existed, so the server was serving the old hardcoded file — an immutable copy of configuration from
+before the change. The Dockerfile comment predicted this in the abstract; the first bring-up after it
+produced it for real, which is a fair summary of how that kind of comment usually ages.
+
+The fix is a bind mount, and it is the shape 10c uses too:
+
+```yaml
+volumes:
+  - ./bookstore-platform/config-repo:/config-repo:ro
+```
+
+The copy stays in the image so `docker run bookstore/config-server` works with nothing mounted; compose
+mounts the working tree over it. **An image is immutable, so a baked-in config repo makes every
+configuration change a rebuild and a redeploy — which is the exact property Step 6 existed to remove.**
+In 10c the same directory arrives as a ConfigMap volume.
+
+**Then the second half.** With the config server fixed and the four services healthy, `GET /api/books`
+still returned 500 — a Netty connection failure inside the gateway. The gateway had started earlier and
+fetched its configuration **once, at startup, from the broken server**, and was still routing to
+`http://localhost:8082`.
+
+That is not a compose quirk, it is the property Step 6c measured: configuration is read at startup and
+does not re-read itself. A config server that changes while a client is running leaves that client on
+the old values until something re-reads them — `/actuator/refresh`, or a restart. **Fixing a
+configuration server does not fix the things already running against it**, and in 10c that becomes a
+rolling restart.
+
+## Memory limits, and the result that runs backwards
+
+Every container has a limit, and the numbers come from running the stack without any and reading
+`docker stats`:
+
+```
+no limits      3519 MiB across thirteen containers
+with limits    2441 MiB, nothing above 54% of its own limit
+```
+
+**Adding limits made the platform use 30% less memory.** Not a cap taking effect — nothing was near a
+limit. Without one, a container sees the *host's* memory, so 10a's `-XX:MaxRAMPercentage=75` sized each
+heap against this laptop's 14.5 GiB. With a 640 MiB limit, book-service's JVM sizes itself to
+`MaxHeapSize = 503316480` — 480 MiB — and a smaller maximum heap means a smaller resident set, because
+the JVM stops deferring collection it has room to defer.
+
+The corollary is the part worth keeping: **an unlimited container makes the same image behave
+differently on every machine it lands on**, and the first place that shows up is a machine smaller than
+the one it was tested on. A limit is what makes the JVM's own sizing deterministic, which is the entire
+reason that flag exists.
+
+| | |
+|---|---|
+| sum of limits | 5504 MiB |
+| actual, idle | 2441 MiB |
+| target host | t3.large, 8 GiB, minus ~800 MiB for k3s and the OS |
+
+Which fits, with the honest caveat that this is an idle stack: limits are what the host must be able to
+give up, and 5504 + 800 = 6.2 GiB of 8 leaves little for a load test.
+
+These are limits and **not** reservations. Compose has no equivalent of Kubernetes `requests`, so
+nothing here reserves memory or informs placement. The distinction arrives properly in 10c and is worth
+being able to state: **requests decide scheduling, limits decide killing.**
+
+## `depends_on` with a condition, not a sleep
+
+```yaml
+depends_on:
+  config-server:
+    condition: service_healthy
+  user-db:
+    condition: service_healthy
+```
+
+`service_started` would mean "the container exists", and a Postgres container that exists is not a
+Postgres accepting connections — the difference is a Flyway migration failing on a cold start. This is
+what 10a's `HEALTHCHECK` lines were for: the dependency is expressed as a condition rather than as a
+guess about how long something takes.
+
+The gateway depends on **only** the config server, deliberately. A gateway that refuses to start until
+every backend is up cannot serve the half of the platform that is healthy, and turns one slow service
+into a total outage. An unreachable route is a 503 on that route and nothing else.
+
+## AWS credentials, and the worst secret handling on the platform
+
+A container has no `~/.aws`, so the laptop's is mounted read-only rather than copied into a `.env`
+beside the compose file — which is how a long-lived IAM credential ends up somewhere nobody is
+watching. Where the directory does not exist, book-service starts, serves the catalog, and fails only
+on the cover and history endpoints; knowing exactly which endpoints degrade is why it is written down.
+
+This still hands a real IAM user's credentials to a process. 10c moves them into a Kubernetes Secret,
+which is better and is not good either. **10d's IRSA is the actual answer, and what makes it the answer
+is that it removes the long-lived credential rather than hiding it.**
+
+## What got worse
+
+- **`restart: unless-stopped` hides crash loops.** The four dead services showed as
+  `Up 3 seconds (health: starting)` on every `docker compose ps` — a stack that looks like it is
+  starting and has in fact been failing for ten minutes. `docker compose ps` should be read together
+  with an uptime that keeps resetting, and 10c's `CrashLoopBackOff` says it out loud instead.
+- **Two ways to run the platform, and only one of them is tested.** The eight-terminal workflow is kept
+  working by the `${VAR:default}` defaults and by nothing else — no test covers it, and a compose-only
+  change could break it silently.
+- **The stack shares one Docker network with no policy on it.** Any container can reach any other,
+  including four databases with fixed credentials. Compose has no NetworkPolicy; 10c does.
+- **Still no end-to-end automated test.** The purchase flow above was run by hand, exactly as in 5a.
+  Now that one command produces the whole platform, the excuse for that is thinner than it was.

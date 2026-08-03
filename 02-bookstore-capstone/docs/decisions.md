@@ -724,6 +724,33 @@ would otherwise run the same suite eight times.
 
 ---
 
+## D31 — Deployment-varying values are placeholders in the config repo, not silent env overrides
+
+**Decision.** Every address that differs between a laptop and a container is written in the config repo
+as `${VAR:laptop-default}`. Compose and Kubernetes set `VAR`.
+
+**Why not just set the environment variable.** It would have worked with **no config change at all**:
+OS environment variables outrank config-server data in Spring's precedence order, so
+`SPRING_DATASOURCE_URL` in compose simply wins. That is exactly what makes it the wrong answer — the
+config repo would go on reading `jdbc:postgresql://localhost:5433/userdb` while every real deployment
+ran somewhere else, and nothing in the file would indicate it was overridable. Step 6 already lists
+*"where does this value come from?"* as the price of a config server; a silent override doubles it.
+
+**Why not a `docker` profile.** It would duplicate `dev` almost exactly, and the platform would then
+have four profiles where the difference between two of them is a hostname. A profile should describe a
+*kind* of environment, not an *instance* of one.
+
+**What the placeholder form buys.** The default keeps the eight-terminal workflow working with no
+environment set, so the change is additive. The same variable name is what `*-prod.yml` already
+required, so compose, a ConfigMap and prod all supply configuration the same way. And reading the file
+tells you which values vary — which is the whole difference between explicit and implicit.
+
+**What it costs.** A default is a value that will be used when someone forgets to set it, and the wrong
+default fails by connecting to the wrong place rather than by refusing to start. Acceptable here
+because the default is a laptop address, which is unreachable from anywhere it would be wrong.
+
+---
+
 ## D5 — Cross-service references are plain IDs, not foreign keys
 
 **Decision.** `order_item.book_id` and `orders.user_id` are plain `BIGINT` columns with no FK constraint.

@@ -12,11 +12,35 @@
 #
 # The obvious objection — "that is two containers to run a bookstore" — is correct, and is the actual
 # cost of the split. Step 10 makes it manageable.
+#
+# ---------------------------------------------------------------------------------------------------
+# MEMORY LIMITS (10b). Every container has one, and the numbers are measured rather than chosen.
+#
+# The stack was first brought up with no limits at all and `docker stats` read off the running system:
+# 3519 MiB across thirteen containers. Each limit here is that service's observed footprint plus
+# roughly 35% headroom, which totals 5504 MiB — the number that has to fit on the 8 GiB t3.large this
+# is eventually deployed to, alongside a Kubernetes control plane.
+#
+# Setting them is not only about the host. Without a limit a container sees the *host's* memory, so
+# -XX:MaxRAMPercentage=75 sizes the heap against 14 GiB on this laptop and against 8 GiB on the server:
+# the same image behaves differently on every machine it lands on, and the first place that shows up
+# is a machine smaller than the one it was tested on. A limit is what makes the JVM's own sizing
+# deterministic — which is the entire reason 10a set that flag.
+#
+# They are limits and not reservations. Compose has no equivalent of a Kubernetes `requests`, so
+# nothing here reserves memory or informs scheduling; that distinction arrives properly in 10c, and it
+# is the one worth being able to explain, because requests decide *placement* and limits decide
+# *killing*.
+# ---------------------------------------------------------------------------------------------------
 
 services:
   user-db:
     image: postgres:17-alpine
     container_name: bookstore-user-db
+    deploy:
+      resources:
+        limits:
+          memory: 192M
     environment:
       POSTGRES_DB: userdb
       POSTGRES_USER: userdb
@@ -34,6 +58,10 @@ services:
   book-db:
     image: postgres:17-alpine
     container_name: bookstore-book-db
+    deploy:
+      resources:
+        limits:
+          memory: 192M
     environment:
       POSTGRES_DB: bookdb
       POSTGRES_USER: bookdb
@@ -51,6 +79,10 @@ services:
   order-db:
     image: postgres:17-alpine
     container_name: bookstore-order-db
+    deploy:
+      resources:
+        limits:
+          memory: 192M
     environment:
       POSTGRES_DB: orderdb
       POSTGRES_USER: orderdb
@@ -68,6 +100,10 @@ services:
   payment-db:
     image: postgres:17-alpine
     container_name: bookstore-payment-db
+    deploy:
+      resources:
+        limits:
+          memory: 192M
     environment:
       POSTGRES_DB: paymentdb
       POSTGRES_USER: paymentdb
@@ -90,17 +126,45 @@ services:
   kafka:
     image: apache/kafka:3.9.1
     container_name: bookstore-kafka
+    deploy:
+      resources:
+        limits:
+          memory: 768M
     ports:
+      # Only the HOST listener is published. Containers reach the broker on the compose network and
+      # need no published port at all.
       - "9092:9092"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      # TWO LISTENERS, and this is the single most confusing thing about running Kafka in Docker.
+      #
+      # A Kafka client does not keep talking to the address it was given. It bootstraps, and the broker
+      # replies with metadata naming the address clients should use from then on - which is
+      # ADVERTISED_LISTENERS, not what the client dialled. With one listener advertised as
+      # `localhost:9092`, a service inside a container connects to `kafka:9092` perfectly, is told
+      # "the leader is at localhost:9092", reconnects to *itself*, and fails. The symptom is a producer
+      # that times out after a successful connection, which sends everyone to look at the network.
+      #
+      # So: two listeners, advertised with the address that is correct from where each caller sits.
+      #
+      #   INTERNAL  kafka:29092       what the eight containers use
+      #   HOST      localhost:9092    what a service started with ../mvnw on the laptop uses
+      #
+      # The laptop keeps 9092 deliberately: `KAFKA_BOOTSTRAP_SERVERS` defaults to localhost:9092 in
+      # config-repo/application.yml, and the CLI examples in test-platform.http say 9092. Giving the
+      # containers the new port rather than the humans is the change that breaks nothing.
+      KAFKA_LISTENERS: INTERNAL://:29092,HOST://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,HOST://localhost:9092
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,HOST:PLAINTEXT
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Broker-to-broker traffic uses the internal name. One broker here, so it changes nothing today
+      # and would be wrong the moment there were two.
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      # The image defaults to -Xmx1G -Xms1G. Capped, because Step 10's whole constraint is nine JVMs
+      # on one 8 GiB machine and a broker holding four topics does not need a gigabyte.
+      KAFKA_HEAP_OPTS: "-Xmx512m -Xms512m"
       # All three default to 3, which a one-broker cluster cannot satisfy - the broker starts and then
       # fails the moment anything needs an internal topic, which looks like a client bug.
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
@@ -119,6 +183,239 @@ services:
       interval: 5s
       timeout: 10s
       retries: 20
+
+  # ==================================================================================================
+  # THE PLATFORM — Step 10b. Eight services that used to be eight terminals.
+  # ==================================================================================================
+  #
+  # ONE PUBLISHED PORT, and it is the point rather than an economy. Step 8 put every client behind
+  # 8080 and left a promise: "in Step 10 a NetworkPolicy makes this the only way in for real". This is
+  # where it is kept. 8081-8086, 8888 and the gateway's management port 9090 are reachable on the
+  # compose network and from nowhere else, so bypassing the gateway is not something an outside client
+  # can *choose* to do any more.
+  #
+  # The services still verify every token themselves, exactly as before — a network boundary is not a
+  # security boundary until something makes it one, and compose networking is not that something. To
+  # see it, ask from inside:
+  #
+  #   docker compose exec order-service wget -qO- http://book-service:8082/api/books
+  #
+  # To publish them anyway while developing, add the port lines back:  ports: ["8081:8081"]
+
+  config-server:
+    build:
+      context: ./bookstore-platform
+      dockerfile: config-server/Dockerfile
+    image: bookstore/config-server:latest
+    container_name: bookstore-config-server
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+    # The master key that decrypts every `{cipher}` value, supplied at run time and in no image layer.
+    # The default is the dev key that is already in the repository — see Step 6d on why that exception
+    # exists and why it is not a recommendation.
+    environment:
+      ENCRYPT_KEY: ${ENCRYPT_KEY:-dev-only-config-server-master-key-do-not-reuse}
+    # Mounted over the copy 10a baked into the image, and the first bring-up is what proved this is
+    # needed. The image was built before the placeholders went into the dev files, so the server served
+    # the old `jdbc:postgresql://localhost:5433/userdb` and four services died on
+    # "Connection to localhost:5433 refused" — with a correct DB_URL sitting in their environment,
+    # unread, because nothing was asking for it.
+    #
+    # An image is immutable, so a baked-in config repo means every configuration change is a rebuild
+    # and a redeploy — which is precisely the property Step 6 existed to remove. The copy stays in the
+    # image so that `docker run bookstore/config-server` works with nothing mounted; this line makes
+    # the working tree the source of truth whenever compose is driving. Read-only, because the config
+    # server has no business writing to it.
+    #
+    # 10c does the same thing with a ConfigMap volume, which is the identical shape: the configuration
+    # arrives as a mounted directory rather than as part of the artefact.
+    volumes:
+      - ./bookstore-platform/config-repo:/config-repo:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8888/actuator/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+
+  user-service:
+    build:
+      context: ./bookstore-platform
+      dockerfile: user-service/Dockerfile
+    image: bookstore/user-service:latest
+    container_name: bookstore-user-service
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    environment:
+      CONFIG_SERVER_URL: http://config-server:8888
+      DB_URL: jdbc:postgresql://user-db:5432/userdb
+    # `service_healthy`, not `service_started`. A container that exists is not a database that accepts
+    # connections, and the difference is a Flyway migration failing on a cold start. This is what the
+    # HEALTHCHECK lines in 10a were for: the dependency is expressed as a condition rather than a
+    # sleep, which is the whole reason `depends_on` alone was never enough.
+    depends_on:
+      config-server:
+        condition: service_healthy
+      user-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  book-service:
+    build:
+      context: ./bookstore-platform
+      dockerfile: book-service/Dockerfile
+    image: bookstore/book-service:latest
+    container_name: bookstore-book-service
+    deploy:
+      resources:
+        limits:
+          memory: 640M
+    environment:
+      CONFIG_SERVER_URL: http://config-server:8888
+      DB_URL: jdbc:postgresql://book-db:5432/bookdb
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    # Step 9's S3 and DynamoDB. A container has no ~/.aws, so the laptop's is mounted read-only —
+    # rather than copying the access key into a `.env` beside this file, which is how a long-lived IAM
+    # credential ends up in a place nobody is watching.
+    #
+    # `~` is expanded by compose, so this is portable; where the directory does not exist, Docker
+    # creates an empty one and book-service starts, serves the catalog, and fails only on the cover
+    # and history endpoints. Knowing exactly which endpoints degrade is the point of writing it down.
+    #
+    # This still hands a real IAM user's credentials to a process. 10c moves them into a Kubernetes
+    # Secret, which is better and is not good either; 10d's IRSA is the actual answer, and what makes
+    # it the answer is that it removes the long-lived credential rather than hiding it.
+    volumes:
+      - ~/.aws:/home/app/.aws:ro
+    depends_on:
+      config-server:
+        condition: service_healthy
+      book-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  order-service:
+    build:
+      context: ./bookstore-platform
+      dockerfile: order-service/Dockerfile
+    image: bookstore/order-service:latest
+    container_name: bookstore-order-service
+    deploy:
+      resources:
+        limits:
+          memory: 640M
+    environment:
+      CONFIG_SERVER_URL: http://config-server:8888
+      DB_URL: jdbc:postgresql://order-db:5432/orderdb
+      BOOK_SERVICE_URL: http://book-service:8082
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      config-server:
+        condition: service_healthy
+      order-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  payment-service:
+    build:
+      context: ./bookstore-platform
+      dockerfile: payment-service/Dockerfile
+    image: bookstore/payment-service:latest
+    container_name: bookstore-payment-service
+    deploy:
+      resources:
+        limits:
+          memory: 576M
+    environment:
+      CONFIG_SERVER_URL: http://config-server:8888
+      DB_URL: jdbc:postgresql://payment-db:5432/paymentdb
+      ORDER_SERVICE_URL: http://order-service:8083
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      config-server:
+        condition: service_healthy
+      payment-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # The two consumers. No database, no API, and nothing calls them — they react to topics.
+  notification-service:
+    build:
+      context: ./bookstore-platform
+      dockerfile: notification-service/Dockerfile
+    image: bookstore/notification-service:latest
+    container_name: bookstore-notification-service
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+    environment:
+      CONFIG_SERVER_URL: http://config-server:8888
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      config-server:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  analytics-service:
+    build:
+      context: ./bookstore-platform
+      dockerfile: analytics-service/Dockerfile
+    image: bookstore/analytics-service:latest
+    container_name: bookstore-analytics-service
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+    environment:
+      CONFIG_SERVER_URL: http://config-server:8888
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      config-server:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api-gateway:
+    build:
+      context: ./bookstore-platform
+      dockerfile: api-gateway/Dockerfile
+    image: bookstore/api-gateway:latest
+    container_name: bookstore-api-gateway
+    deploy:
+      resources:
+        limits:
+          memory: 448M
+    ports:
+      # The platform's only address. 9090 is deliberately not here: it serves actuator, and Step 8c
+      # moved it off the public port after /actuator/env answered 200 on the internet-facing component.
+      # Not publishing it is the same guarantee with nothing left to configure wrong.
+      - "8080:8080"
+    environment:
+      CONFIG_SERVER_URL: http://config-server:8888
+      USER_SERVICE_URL: http://user-service:8081
+      BOOK_SERVICE_URL: http://book-service:8082
+      ORDER_SERVICE_URL: http://order-service:8083
+      PAYMENT_SERVICE_URL: http://payment-service:8084
+    # Only the config server, on purpose. A gateway that refuses to start until every backend is up is
+    # a gateway that cannot serve the half of the platform that is healthy, and it turns one slow
+    # service into a total outage. An unreachable route is a 503 on that route and nothing else.
+    depends_on:
+      config-server:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   user-pgdata:
