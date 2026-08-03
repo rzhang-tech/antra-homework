@@ -374,6 +374,52 @@ Updated in the same commit as the step, which is the point of the last entry bel
 
 ---
 
+## The teardown script deleted the wrong region's resources, and what that taught
+
+Not a design flaw found by review — an accident, recovered from, and worth more than most of the
+planned work because of what the recovery exposed.
+
+**What happened.** A guard was added to `teardown.sh` so it would refuse to run against a region where
+nothing from Step 9 exists. It was then *tested* with `--yes`, which is not a test, it is a teardown.
+The run targeted `us-east-2` while every resource lives in `us-east-1`, and the guard let it through.
+
+**Why the guard failed, which is the technical part worth keeping.** It probed for the S3 bucket:
+
+```bash
+aws s3api head-bucket --bucket "${BUCKET}"
+```
+
+**S3 bucket names are global.** `head-bucket` succeeds from any region at all, so the guard "confirmed"
+the resources were present, and the script deleted the bucket — correctly identifying it, from the
+wrong place. A region guard must probe something *regional*; it now probes only DynamoDB, and refuses
+outright if `get-bucket-location` disagrees with the target region.
+
+**The damage, and the part of it nobody would have predicted.** The bucket (5 cover versions) and the
+IAM role went. DynamoDB, Lambda, SNS and SQS survived. Re-running the four provisioning scripts
+restored everything — which is exactly the property D28 claims for them, tested for real rather than
+asserted — and then the Lambda still failed, twice, for two different reasons:
+
+1. **`403 s3:ListBucket`**, for about a minute. IAM is eventually consistent; the role existed and its
+   policy had not propagated. The interesting half is that the *next* error was `404 NoSuchKey` — the
+   readable message that Step 9d's prefix-conditioned `ListBucket` grant exists to buy, arriving
+   exactly as that step documented.
+2. **`KMSAccessDeniedException` on the AWS-managed `aws/lambda` key.** Lambda encrypts environment
+   variables with a KMS **grant** created for the execution role. Deleting the role invalidated the
+   grant, and re-creating a role with an identical name and ARN did **not** repair it: resource-based
+   authorisation is bound to a role's internal principal ID, which is new every time. Updating the
+   function's environment did not refresh it either. Deleting and re-creating the *function* did.
+
+**The generalisation, which is the actual lesson: deleting an IAM role breaks things that never
+mentioned IAM.** The failure surfaced as a KMS error, on a key nothing in this repository configures,
+minutes later, in a component that was never touched. Recreating the role by name looks like a
+complete repair and is not.
+
+**And the process lesson.** A destructive command is not a test. If the intent is to demonstrate that a
+guard refuses, run it *without* `--yes` — the guard's whole job is to answer before the deletion. The
+dry-run path existed and was skipped.
+
+---
+
 ## Things I would do differently if starting over
 
 - **Model `Author` from the first schema** (Step 1), rather than splitting it across two steps.

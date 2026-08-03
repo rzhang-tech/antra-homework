@@ -15,7 +15,16 @@
 set -euo pipefail
 
 CONFIRM="${1:-}"
-REGION="$(aws configure get region)"
+# THE REGION THE RESOURCES ACTUALLY LIVE IN, not whatever this machine happens to default to.
+#
+# This used to be `$(aws configure get region)`, and that is a quiet way to lose money. Run from a box
+# configured for a different region - a new EC2 instance, a colleague's laptop, a CI runner with no
+# config at all - the script looks in an empty region, finds nothing, reports every resource as already
+# gone, and exits successfully. **A teardown that cleans the wrong region is worse than no teardown**,
+# because it tells you that you are done.
+#
+# Overridable for anyone who genuinely deploys elsewhere; the default is where Step 9 put things.
+REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 BUCKET="bookstore-covers-${ACCOUNT: -6}"
 
@@ -33,6 +42,57 @@ This will delete, in account ${ACCOUNT} / ${REGION}:
   S3          ${BUCKET}                         <-- every cover AND every old version
 
 EOF
+
+# DOES ANYTHING ACTUALLY EXIST HERE? Asked before deleting, because "nothing to delete" has two very
+# different causes and the script cannot otherwise tell them apart:
+#
+#   already torn down          fine, exit quietly
+#   pointed at the wrong region / account   NOT fine, and every delete below will succeed at nothing
+#
+# THE PROBES MUST BE REGIONAL. The first version of this guard used `s3api head-bucket`, and that is
+# the bug that made the guard useless — **S3 bucket names are global**, so head-bucket succeeds from
+# any region at all. Running with AWS_REGION=us-east-2 against resources in us-east-1 therefore found
+# the bucket, decided the region was correct, and went on to delete it. Which it did.
+#
+# So: only DynamoDB, which is genuinely regional. If neither table is in this region, nothing that
+# Step 9 built is, and the script must not touch anything global on its way to finding that out.
+FOUND=0
+for t in CoverMetadata UserBrowsingHistory; do
+  aws dynamodb describe-table --table-name "$t" --region "${REGION}" >/dev/null 2>&1 \
+    && FOUND=$((FOUND + 1))
+done
+
+# And before deleting the bucket, check where it actually lives. A global name plus a regional script
+# is exactly the combination that deletes the right bucket from the wrong place.
+BUCKET_REGION="$(aws s3api get-bucket-location --bucket "${BUCKET}" \
+  --query 'LocationConstraint' --output text 2>/dev/null || echo absent)"
+[ "${BUCKET_REGION}" = "None" ] && BUCKET_REGION=us-east-1   # the API's way of saying us-east-1
+
+if [ "${BUCKET_REGION}" != "absent" ] && [ "${BUCKET_REGION}" != "${REGION}" ]; then
+  echo "REFUSING: bucket ${BUCKET} is in ${BUCKET_REGION}, this run targets ${REGION}."
+  echo "Re-run with AWS_REGION=${BUCKET_REGION} if that is what you meant. Nothing was deleted."
+  exit 1
+fi
+
+if [ "${FOUND}" -eq 0 ]; then
+  cat <<EOF
+Nothing from Step 9 is present in ${ACCOUNT} / ${REGION}.
+
+That means one of two things, and they are not the same:
+  - it has already been torn down; or
+  - this is the wrong region or the wrong account, and the resources are still running somewhere else.
+
+Check before assuming the first:
+  aws s3api list-buckets --query "Buckets[?starts_with(Name,'bookstore-covers')].Name"
+  aws dynamodb list-tables --region us-east-1
+
+Override with AWS_REGION=<region> if you deployed elsewhere. Nothing was deleted.
+EOF
+  exit 0
+fi
+
+echo "Found ${FOUND}/3 core resources in ${REGION}."
+echo
 
 if [ "${CONFIRM}" != "--yes" ]; then
   echo "Dry run. Re-run with --yes to delete."

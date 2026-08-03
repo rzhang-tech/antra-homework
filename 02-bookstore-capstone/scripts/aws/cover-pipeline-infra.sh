@@ -15,7 +15,16 @@
 
 set -euo pipefail
 
-REGION="$(aws configure get region)"
+# THE REGION THE RESOURCES ACTUALLY LIVE IN, not whatever this machine happens to default to.
+#
+# This used to be `$(aws configure get region)`, and that is a quiet way to lose money. Run from a box
+# configured for a different region - a new EC2 instance, a colleague's laptop, a CI runner with no
+# config at all - the script looks in an empty region, finds nothing, reports every resource as already
+# gone, and exits successfully. **A teardown that cleans the wrong region is worse than no teardown**,
+# because it tells you that you are done.
+#
+# Overridable for anyone who genuinely deploys elsewhere; the default is where Step 9 put things.
+REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 BUCKET="bookstore-covers-${ACCOUNT: -6}"
 
