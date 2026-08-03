@@ -137,18 +137,23 @@ jobs:
         # already had it.
         run: echo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> $GITHUB_ENV
 
-      # `set image` per deployment rather than `apply`, because the manifests in k8s/ are the desired
-      # state and the image tag is the only thing a deploy changes. Kubernetes then performs a rolling
-      # update on its own: new pod up and passing its readinessProbe before the old one is removed,
-      # which is what makes the deploy zero-downtime and is the reason 10c's probes had to be right.
-      - name: Roll out the new images
+      # deploy.sh rather than a loop of `kubectl set image`, and the difference is not tidiness.
+      #
+      # `set image` deploys CODE and nothing else. A change to config-repo/ - a CORS origin, a timeout,
+      # a resilience threshold - would sail through the pipeline, rebuild eight images, restart eight
+      # pods, and leave the ConfigMap exactly as it was, because nothing in the job ever touched it.
+      # The deploy would be green and the change would not have happened.
+      #
+      # Found by adding `http://localhost:4200` to the CORS list and noticing there was no step that
+      # could possibly deliver it. deploy.sh rebuilds the ConfigMap from the repo, stamps the checksum
+      # that forces the rollout, and applies the manifests - so code and configuration ship together,
+      # which is the only version of "deployed" that means anything.
+      - name: Deploy
         run: |
-          for svc in config-server api-gateway user-service book-service \
-                     order-service payment-service notification-service analytics-service; do
-            kubectl set image deployment/$svc \
-              $svc=${{ env.REGISTRY }}/${{ github.repository_owner }}/bookstore/$svc:${{ github.sha }} \
-              -n bookstore
-          done
+          cd 02-bookstore-capstone
+          IMAGE_REPO=${{ env.REGISTRY }}/${{ github.repository_owner }} \
+          IMAGE_TAG=${{ github.sha }} \
+          bash k8s/deploy.sh
 
       # THE ROLLBACK PATH, and it is a real one rather than a promise. `kubectl rollout status` fails if
       # the new pods do not become ready inside the timeout, and `rollout undo` returns each Deployment

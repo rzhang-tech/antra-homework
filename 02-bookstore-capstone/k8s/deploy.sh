@@ -101,6 +101,23 @@ echo "==> secrets"
 AWS_KEY="${AWS_ACCESS_KEY_ID:-$(aws configure get aws_access_key_id 2>/dev/null || true)}"
 AWS_SECRET="${AWS_SECRET_ACCESS_KEY:-$(aws configure get aws_secret_access_key 2>/dev/null || true)}"
 
+# KEEP WHAT IS ALREADY THERE RATHER THAN OVERWRITING IT WITH NOTHING.
+#
+# `kubectl create secret ... | kubectl apply` replaces the whole object, so running this script from a
+# machine with no AWS configuration would wipe credentials somebody had set by hand — and the symptom
+# would appear later, in book-service, as cover and history endpoints that used to work.
+#
+# That machine is the CI runner. It has kubectl and no ~/.aws, by design: this pipeline deliberately
+# holds no AWS credential (D38's argument). Without these four lines, every automated deploy would
+# quietly break the two AWS-backed endpoints.
+if [[ -z "$AWS_KEY" ]]; then
+  AWS_KEY="$(kubectl get secret bookstore-secrets -n "$NS" \
+    -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  AWS_SECRET="$(kubectl get secret bookstore-secrets -n "$NS" \
+    -o jsonpath='{.data.AWS_SECRET_ACCESS_KEY}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  [[ -n "$AWS_KEY" ]] && echo "    reusing the AWS credentials already in the cluster"
+fi
+
 if [[ -z "$AWS_KEY" ]]; then
   echo "    no AWS credentials found — book-service will serve the catalog and fail on"
   echo "    /api/books/{id}/cover and /api/books/me/history. Everything else is unaffected."
