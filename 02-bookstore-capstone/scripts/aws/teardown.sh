@@ -91,7 +91,7 @@ EOF
   exit 0
 fi
 
-echo "Found ${FOUND}/3 core resources in ${REGION}."
+echo "Found ${FOUND}/2 DynamoDB tables in ${REGION}."
 echo
 
 if [ "${CONFIRM}" != "--yes" ]; then
