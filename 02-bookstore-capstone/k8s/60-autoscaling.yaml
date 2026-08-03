@@ -1,0 +1,147 @@
+# Horizontal Pod Autoscalers — Step 10d.
+#
+# ===================================================================================================
+# WHICH SERVICES ARE HERE, AND WHY THE OTHER FOUR ARE NOT
+#
+# An HPA is a statelessness test that runs in production, and applying one to this platform found the
+# state. Every service was examined rather than assumed:
+#
+#   api-gateway     YES  Step 8 wrote down "no business logic, no aggregation, no stored state", and
+#                        this is where that rule pays: everything it knows comes from the request or
+#                        the config server, so N instances agree about nothing and need not.
+#   user-service    YES  a token is a signature, not a session. Nothing to share between replicas.
+#   book-service    YES  reads from its own database. The browsing-history writer is fire-and-forget
+#                        into a per-pod bounded executor (9a), so replicas do not coordinate.
+#   order-service   YES  but read the note on the recovery job below.
+#
+#   payment-service NO   not for correctness — `order_id UNIQUE` (5e) makes concurrent replicas safe.
+#                        It is left at one because PaymentRecoveryJob never gives up by design, so N
+#                        replicas means N processes sweeping the same rows forever. Correct, and
+#                        wasteful in the one service where wasted work is somebody's money.
+#   notification-   NO   MEASURED BROKEN. Its "have I already confirmed order 17?" guard is a bounded
+#   service              in-memory set (7c), so a redelivery landing on a different replica sends the
+#                        customer a second email. 7c already stated the rule this violates: an
+#                        idempotency guard must be at least as durable as the effect it guards.
+#   analytics-      NO   MEASURED BROKEN, and this one is visible without any failure at all. Scaled
+#   service              to 2, with 7 orders placed:
+#
+#                            pod A   TALLY: 2 order(s), revenue 99.98
+#                            pod B   TALLY: 4 order(s), revenue 199.96
+#
+#                        Kafka splits the partitions between the two consumers, each pod tallies only
+#                        what it consumed, and BOTH numbers are wrong. Nothing errors, nothing warns,
+#                        and a dashboard reading either one is simply lying. The fix is that the tally
+#                        does not belong in a JVM's heap — it belongs in a database or in Redis, which
+#                        is exactly what 7c called out as outstanding.
+#
+# THE GENERAL SHAPE: a service is horizontally scalable when its replicas share nothing, and the state
+# that stops them is rarely a database — it is a cache, a counter, a scheduled job or an in-memory
+# idempotency guard. Two of eight, both consumers, both storing their state in the heap.
+#
+# THE RECOVERY-JOB CAVEAT (5d, which named Step 10 as where this becomes unavoidable). OrderRecoveryJob
+# runs on every replica, so two replicas sweep the same stuck orders. This is safe rather than merely
+# tolerated: 5d made release idempotent precisely so a repeat is a no-op, and the losing transaction
+# rolls back on the primary key. The cost is duplicated scanning, not incorrectness. The real answer at
+# scale is a shared lock (ShedLock) or a single leader, and the Kubernetes-native answer is to move the
+# job out of the Deployment into a CronJob — none of which is free, all of which are named here rather
+# than discovered later.
+#
+# ===================================================================================================
+# AND THE FINDING THAT LIMITS ALL OF IT
+#
+# A Kubernetes Service load-balances CONNECTIONS, not requests. Measured with order-service at 2:
+#
+#   20 requests through the gateway (pooled)      pod A 20   pod B 0
+#   20 requests on fresh connections              pod A 12   pod B 8
+#
+# kube-proxy picks a backend when the TCP connection is established; every request on that connection
+# then goes to the same pod. So an HPA can add a pod that receives nothing. `max-life-time: 10s` on the
+# gateway's client pool (config-repo/api-gateway.yml) bounds how long that can last, and is a trade
+# rather than a fix — the real answer is L7 load balancing, which is a service mesh.
+#
+# ===================================================================================================
+# ON A SINGLE NODE, AN HPA CAN ONLY SCALE UNTIL THE NODE IS FULL. maxReplicas here are deliberately
+# small: the t3.large this deploys to has 2 vCPU and 8 GiB, and an HPA that wants a pod the scheduler
+# cannot place produces a Pending pod and no improvement whatsoever. Autoscaling without a Cluster
+# Autoscaler underneath is bounded by the machine, and saying so is more useful than a large number.
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-gateway
+  namespace: bookstore
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: api-gateway}
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    # 70% of the *request*, not of the limit — which is why requests being honest matters twice: once
+    # for scheduling, and again as the denominator the autoscaler divides by. A request set far above
+    # real usage makes the ratio permanently small and the HPA never fires.
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 70}
+  behavior:
+    scaleUp:
+      # React quickly: a queue builds while you deliberate.
+      stabilizationWindowSeconds: 30
+    scaleDown:
+      # And slowly. A JVM costs ~20 seconds to replace, so flapping is expensive in a way that a
+      # goroutine or a Node process is not — scaling down into a second burst pays that cost twice
+      # and drops requests in between. Five minutes is the default and it is the right default here.
+      stabilizationWindowSeconds: 300
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: user-service
+  namespace: bookstore
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: user-service}
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 70}
+  behavior:
+    scaleUp: {stabilizationWindowSeconds: 30}
+    scaleDown: {stabilizationWindowSeconds: 300}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: book-service
+  namespace: bookstore
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: book-service}
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 70}
+  behavior:
+    scaleUp: {stabilizationWindowSeconds: 30}
+    scaleDown: {stabilizationWindowSeconds: 300}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: order-service
+  namespace: bookstore
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: order-service}
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 70}
+  behavior:
+    scaleUp: {stabilizationWindowSeconds: 30}
+    scaleDown: {stabilizationWindowSeconds: 300}

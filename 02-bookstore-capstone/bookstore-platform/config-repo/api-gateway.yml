@@ -93,6 +93,30 @@ spring:
             # with it.
             connect-timeout: 2000
             response-timeout: 10s
+            pool:
+              # A CONNECTION POOL DEFEATS A KUBERNETES SERVICE, and this is where that is dealt with.
+              #
+              # A Service load-balances **connections**, not requests: kube-proxy picks a backend pod
+              # when the TCP connection is established, and every request on that connection then goes
+              # to the same pod for as long as it lives. Netty's pool keeps connections alive
+              # indefinitely, so the gateway picks one order-service pod on its first call and never
+              # reconsiders. Measured with two replicas (Step 10d):
+              #
+              #   20 requests through the gateway     pod A 20   pod B 0
+              #   20 requests on fresh connections    pod A 12   pod B 8
+              #
+              # Adding replicas distributes nothing at all on the path that actually carries traffic,
+              # and an HPA on top of that scales a pod that receives no work.
+              #
+              # `max-life-time` closes and re-opens a connection after this long, which re-runs the
+              # Service's choice. It is a MITIGATION AND A TRADE, not a fix: shorter means better
+              # balance and more TCP handshakes, and it only rebalances at this granularity.
+              #
+              # The actual fix is load balancing that understands requests rather than connections -
+              # a service mesh sidecar, an L7 proxy in front of each service, or client-side load
+              # balancing with a discovery client. All three are larger than this platform.
+              max-life-time: 10s
+              max-idle-time: 5s
 
 management:
   # A SEPARATE PORT, and this one is a fix rather than a flourish.

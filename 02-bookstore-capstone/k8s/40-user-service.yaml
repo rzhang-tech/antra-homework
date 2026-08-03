@@ -58,6 +58,11 @@ spec:
   template:
     metadata:
       labels: {app: user-service}
+      annotations:
+        # Same checksum config-server carries, and for the same reason: EVERY service reads the config
+        # repo once at startup and never again. Stamping it only on config-server was a real gap —
+        # a changed value reached the server and none of its seven clients. deploy.sh replaces it.
+        bookstore.config-repo/checksum: "replaced-by-deploy.sh"
     spec:
       containers:
         - name: user-service

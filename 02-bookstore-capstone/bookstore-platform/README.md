@@ -2156,3 +2156,147 @@ authentication wrong — which is exactly what Step 8 spent a step removing.
 - **One node, one replica of everything.** Nothing here has been shown to survive a node failure,
   because there is nowhere for anything to move to. `replicas: 2` is one word, and it is 10d's problem
   because 5d's recovery job and 7d's DLT monitor both assume they are the only instance.
+
+---
+
+# Step 10d — an autoscaler is a statelessness test, and it found the state
+
+[`k8s/60-autoscaling.yaml`](../k8s/60-autoscaling.yaml) adds HPAs, and
+[`docs/eks-and-irsa.md`](../docs/eks-and-irsa.md) is the EKS mapping. Both were the step's stated
+challenge items; the interesting part was what applying them exposed.
+
+metrics-server has to be installed on kind and is bundled with k3s — the first of several places where
+"the same manifests everywhere" needed a footnote.
+
+## It scales
+
+40 concurrent loops against the gateway, 100 seconds in:
+
+```
+NAME            TARGETS           MINPODS  MAXPODS  REPLICAS
+api-gateway     cpu: 1480%/70%    1        3        3
+book-service    cpu: 2194%/70%    1        3        3
+order-service   cpu:   15%/70%    1        2        2
+user-service    cpu:   10%/70%    1        2        1
+```
+
+1 → 3 on both hot services, six pods `Running` with 0 restarts. The utilisation figures are percentages
+**of the request**, not of the limit, which is why honest requests matter twice: once as what the
+scheduler reserves, and again as the denominator the autoscaler divides by. A request padded "to be
+safe" makes the ratio permanently small and the HPA never fires.
+
+`scaleDown.stabilizationWindowSeconds: 300` against a 30-second scale-up, because a JVM costs about 20
+seconds to replace. Flapping is expensive here in a way it is not for a Go binary.
+
+## But adding replicas distributed nothing
+
+order-service at 2 replicas, counting which pod actually did the work:
+
+```
+20 requests through the gateway     pod A 20   pod B 0
+20 requests on fresh connections    pod A 12   pod B 8
+```
+
+**A Kubernetes Service load-balances connections, not requests.** kube-proxy picks a backend when the
+TCP connection is established; every request on that connection then goes to the same pod for as long
+as it lives. The gateway's Netty pool keeps connections alive indefinitely, so it chose one pod on its
+first call and never reconsidered — and an HPA on top of that adds pods that receive nothing.
+
+This is the most transferable thing in Step 10. It is invisible in every tutorial, because a tutorial
+sends requests with `curl` and `curl` opens a new connection every time.
+
+Bounding the connection lifetime fixes the symptom. `max-life-time: 10s` on the gateway's client pool,
+40 requests spread over a minute:
+
+```
+pod A 19   pod B 21
+```
+
+It is a trade rather than a fix: shorter means better balance and more TCP handshakes, and it only
+rebalances at that granularity. **The real answer is load balancing that understands requests** — a
+service mesh sidecar, an L7 proxy per service, or client-side load balancing over a discovery client.
+All three are larger than this platform, and naming them is the honest end of the argument.
+
+## Which services can scale, and the two that measurably cannot
+
+Every service was examined rather than assumed, and two failed.
+
+**analytics-service is broken at 2 replicas, with no failure involved at all.** Scaled to two, seven
+orders placed:
+
+```
+pod A   TALLY: 2 order(s), revenue 99.98
+pod B   TALLY: 4 order(s), revenue 199.96
+```
+
+Kafka splits the partitions between the two consumers, each pod tallies only what it consumed, and
+**both numbers are wrong**. Nothing errors, nothing warns, and a dashboard reading either one is simply
+lying. The tally lives in a JVM heap, which 7c already listed as outstanding; scaling is what turns
+that from a durability note into a correctness bug.
+
+**notification-service is broken for the same reason**, one step less visibly: its "have I already
+confirmed order 17?" guard is a bounded in-memory set, so a redelivery landing on a different replica
+sends the customer a second email. 7c stated the rule this violates — *an idempotency guard must be at
+least as durable as the effect it guards* — and a second replica is a second, emptier guard.
+
+The four that do scale, and why:
+
+| | |
+|---|---|
+| **api-gateway** | Step 8's three rules — no business logic, no aggregation, no stored state — are exactly the statelessness an HPA needs. That rule was written to keep the gateway honest, and this is where it pays. |
+| **user-service** | a token is a signature, not a session |
+| **book-service** | reads its own database; the history writer is fire-and-forget into a per-pod executor |
+| **order-service** | request path is stateless; the recovery job duplicates work but not effect |
+
+**The recovery job caveat, which 5d named Step 10 as the deadline for.** `OrderRecoveryJob` runs on
+every replica, so two replicas sweep the same stuck orders. That is *safe* rather than merely
+tolerated: 5d made release idempotent precisely so a repeat is a no-op, and two racing transactions are
+settled by a primary key. The cost is duplicated scanning, not incorrectness — and payment-service is
+left at one replica anyway, because `PaymentRecoveryJob` never gives up by design and N replicas means
+N processes sweeping forever, in the one service where wasted work is somebody's money.
+
+**The general shape:** a service is horizontally scalable when its replicas share nothing, and the
+state that stops them is almost never the database. It is a cache, a counter, a scheduled job, or an
+in-memory idempotency guard. Two of eight here, both event consumers, both keeping their state in the
+heap.
+
+## The incident this step caused, which is the most realistic thing in it
+
+Adding the connection-pool setting introduced a **duplicate `httpclient` key** into
+`config-repo/api-gateway.yml` — the file already had one, forty lines further down. What happened next
+is worth the whole sub-step:
+
+- the config server returned **500** for `/api-gateway/dev`;
+- the **running** gateway pod carried on serving perfectly, because it read its configuration at
+  startup and never again;
+- and the two pods the **HPA had just created** could not start.
+
+So a broken configuration change was invisible until something needed to restart — and the thing that
+needed to restart was the autoscaler responding to load. **The failure surfaced at peak traffic, in new
+pods, while the old ones looked healthy.** A deployment would have found it too; an autoscaler finds it
+at the worst possible moment and without a human present.
+
+Two things follow, and both were fixed rather than noted:
+
+1. **Nothing validates the config repo.** `ConfigServerContractTest` asserts what the files *say*; it
+   did not catch a file that will not parse, because a duplicate key is legal YAML to some parsers and
+   fatal to SnakeYAML's strict mode. A test that simply loads every file in `config-repo/` would have
+   caught this at build time, and that is Step 11's list.
+2. **`deploy.sh` stamped the config checksum on config-server only.** Every other service reads that
+   configuration once at startup too, so a changed value reached the server and none of its seven
+   clients — the 10b bug, reintroduced by my own deploy script. All eight pod templates carry the
+   annotation now.
+
+## What got worse
+
+- **The platform now has a load-balancing story that only works because of a timeout.** `max-life-time`
+  is a workaround with a number in it, and the number is a guess about how long an imbalance is
+  tolerable.
+- **Two services are pinned at one replica by in-memory state**, and nothing enforces that. Somebody
+  scaling analytics-service gets wrong numbers and no error; a comment in a YAML file is the only
+  guard.
+- **The HPA cannot help on one node.** Autoscaling pods without autoscaling nodes is bounded by the
+  machine, and on a t3.large the ceiling arrives quickly. Karpenter is the EKS answer and is in the
+  design note, not in this repository.
+- **The config repo can still be broken in a way nothing catches until a pod restarts.** Fixed for the
+  one file that broke; unvalidated in general.

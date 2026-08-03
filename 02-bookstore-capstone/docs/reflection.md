@@ -294,6 +294,50 @@ Updated in the same commit as the step, which is the point of the last entry bel
 
 ---
 
+## Step 10 — containers, compose and Kubernetes
+
+- **Two services cannot be scaled and nothing enforces it.** analytics-service and
+  notification-service keep their state — a running tally and an idempotency guard — in a JVM heap, so
+  a second replica produces wrong numbers and duplicate emails respectively, silently. Measured: two
+  analytics pods reported 2 orders / 99.98 and 4 orders / 199.96 for the same seven orders, and neither
+  is right. A comment in `60-autoscaling.yaml` is the only thing stopping somebody running
+  `kubectl scale`. **The fix is that neither piece of state belongs in a heap** — a table with a
+  retention policy, or Redis with a TTL longer than the worst redelivery window, which 7c already named.
+- **Load balancing works because of a timeout.** A Service balances *connections*, not requests, so the
+  gateway's pooled connection sent 20 of 20 requests to one of two order-service pods. Bounding
+  connection lifetime to 10s made it 19/21. That is a workaround with a guessed number in it; the real
+  answer is L7 load balancing, meaning a service mesh, and that is a bigger addition than this platform
+  can carry.
+- **The config repo is not validated anywhere.** A duplicate `httpclient` key made the config server
+  return 500 for `/api-gateway/dev` — and the *running* gateway carried on serving perfectly, because
+  it read its configuration at startup and never again. Only the pods the HPA had just created failed,
+  which means a bad configuration change surfaced **at peak load, in new pods, with the old ones
+  looking healthy**. `ConfigServerContractTest` asserts what the files say and never that they parse. A
+  test that simply loads every file in `config-repo/` is twenty lines and belongs in Step 11.
+- **Images are built from untested code** (D30). `-DskipTests` in every Dockerfile, because the suite
+  needs Testcontainers and that would mean docker-in-docker. "It built" currently means "it compiled".
+  Step 11's pipeline is where a failing test stops an image existing.
+- **`:latest` plus `imagePullPolicy: Never` is not a version.** It means "whatever was last loaded into
+  this node", which cannot be rolled back to. Commit-SHA tags in a registry are Step 11.
+- **The databases run in the cluster with one replica, no backups and no failover.** D26 already argues
+  for RDS; the honest reason they are in-cluster is that a capstone should start with one command for
+  whoever clones it. Stated rather than implied.
+- **A Kubernetes Secret is base64, not encryption**, and it holds a long-lived IAM user key. Encrypting
+  etcd or an external store improves where it sits; only IRSA removes it, and IRSA needs EKS —
+  [`docs/eks-and-irsa.md`](eks-and-irsa.md) designs it and this repository does not run it.
+- **Two descriptions of the same platform.** `docker-compose.yml` and `k8s/` carry the same addresses
+  and the same memory numbers, and nothing checks that they agree. Collapsing them means Helm or
+  Kustomize, which means a templating language over manifests that are currently readable as-is.
+- **Autoscaling is bounded by one machine.** Pods scale, nodes do not. On the t3.large the ceiling
+  arrives fast, and beyond it the HPA produces `Pending` pods and no improvement.
+- **A prediction written into the manifests was wrong, and the fix was to change the comment.** Step 10c
+  expected `CrashLoopBackOff` to be the startup-ordering mechanism; every pod came up with 0 restarts,
+  because Step 6a's config retry — added for a laptop — absorbed the wait inside the JVM. Worth keeping
+  as an instance of the 9d rule pointing the other way: a measurement that contradicts the guess is also
+  an action, not a footnote.
+
+---
+
 ## Things I would do differently if starting over
 
 - **Model `Author` from the first schema** (Step 1), rather than splitting it across two steps.

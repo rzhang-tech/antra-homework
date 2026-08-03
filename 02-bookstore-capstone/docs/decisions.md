@@ -803,6 +803,66 @@ dedicated box.
 
 ---
 
+## D34 — Only four of the eight services get an autoscaler, and the other four say why
+
+**Decision.** HPAs on api-gateway, user-service, book-service and order-service. None on
+config-server, payment-service, notification-service or analytics-service.
+
+**Why this is a decision and not a configuration.** An HPA is a statelessness test that runs in
+production. Applying one to every service would have been one line each and would have introduced two
+silent correctness bugs:
+
+- **analytics-service**, at two replicas: Kafka splits the partitions between the consumers, each pod
+  tallies only what it consumed, and both report wrong totals. Measured — 2 orders / 99.98 against
+  4 orders / 199.96, for the same seven orders. Nothing errors.
+- **notification-service**: its idempotency guard is a bounded in-memory set, so a redelivery landing
+  on the other replica sends a second email. 7c's rule, violated by adding a replica.
+
+payment-service is safe but excluded anyway: `PaymentRecoveryJob` never gives up by design, so N
+replicas means N processes sweeping the same rows forever, in the service where wasted work is
+somebody's money.
+
+**The general shape.** A service is horizontally scalable when its replicas share nothing, and what
+stops them is almost never the database — it is a cache, a counter, a scheduled job or an in-memory
+idempotency guard. Two of eight here, both event consumers, both keeping state in the heap.
+
+**What is left unenforced.** Nothing stops somebody running `kubectl scale` on analytics-service and
+getting wrong numbers with no error. A comment is the only guard, and the real fix is moving that state
+into a database or Redis — which is what 7c already listed as outstanding.
+
+---
+
+## D35 — A Service load-balances connections, not requests
+
+**Decision.** Recorded as a decision because it changes what "scaling out" means on this platform, and
+because the mitigation is a trade that somebody should be able to argue with.
+
+**The measurement.** order-service at two replicas:
+
+```
+20 requests through the gateway (pooled connections)    pod A 20   pod B 0
+20 requests on fresh connections                        pod A 12   pod B 8
+```
+
+kube-proxy chooses a backend when the TCP connection is established, and every request on that
+connection goes to the same pod for as long as it lives. Netty's pool keeps connections alive
+indefinitely, so the gateway picked one pod on its first call and never reconsidered — and an HPA on
+top of that adds pods that receive no traffic.
+
+**The mitigation, and its cost.** `spring.cloud.gateway...httpclient.pool.max-life-time: 10s` closes
+and re-opens connections, which re-runs the Service's choice: 19/21 over the same test. Shorter means
+better balance and more TCP handshakes; it only rebalances at that granularity, and the number is a
+guess about how long an imbalance is tolerable.
+
+**Why not the real fix.** Request-aware load balancing means a service mesh sidecar, an L7 proxy per
+service, or client-side load balancing over a discovery client. Each is a larger addition than this
+platform can justify, and each would need its own operational story.
+
+**Why it is worth knowing.** It is invisible in tutorials, because a tutorial sends requests with
+`curl`, and `curl` opens a new connection every time.
+
+---
+
 ## D5 — Cross-service references are plain IDs, not foreign keys
 
 **Decision.** `order_item.book_id` and `orders.user_id` are plain `BIGINT` columns with no FK constraint.

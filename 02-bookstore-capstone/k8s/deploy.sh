@@ -101,15 +101,17 @@ kubectl apply -f "$K8S/10-postgres.yaml" -f "$K8S/20-kafka.yaml"
 # ---------------------------------------------------------------------------------------------------
 CHECKSUM=$(cat "$CONFIG_REPO"/*.yml | sha256sum | cut -c1-16)
 echo "==> config-repo checksum $CHECKSUM"
-sed "s|replaced-by-deploy.sh|$CHECKSUM|" "$K8S/31-config-server.yaml" | kubectl apply -f -
 
-kubectl apply -f "$K8S/40-user-service.yaml" \
-               -f "$K8S/41-book-service.yaml" \
-               -f "$K8S/42-order-service.yaml" \
-               -f "$K8S/43-payment-service.yaml" \
-               -f "$K8S/44-notification-service.yaml" \
-               -f "$K8S/45-analytics-service.yaml" \
-               -f "$K8S/50-api-gateway.yaml"
+# EVERY workload, not only config-server. Stamping it on the server alone was a real gap, found in 10d
+# by changing a gateway value: the config server rolled, and the gateway went on serving the old one.
+# The server is not the only process that reads this configuration once at startup and never again.
+for f in 31-config-server 40-user-service 41-book-service 42-order-service \
+         43-payment-service 44-notification-service 45-analytics-service 50-api-gateway; do
+  sed "s|replaced-by-deploy.sh|$CHECKSUM|" "$K8S/$f.yaml"
+  echo "---"
+done | kubectl apply -f -
+
+kubectl apply -f "$K8S/60-autoscaling.yaml"
 
 echo
 echo "==> waiting for the platform"
