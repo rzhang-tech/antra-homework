@@ -100,6 +100,25 @@ fi
 # topic, and send failures to one queue. Every resource below is named. AmazonS3FullAccess would
 # have worked and would have given a function that processes images the ability to delete every
 # bucket in the account.
+#
+# THE ListBucket STATEMENT IS NOT AN OVERSIGHT BEING CORRECTED - it buys a readable error message,
+# and it was added after measuring what its absence costs.
+#
+# Without s3:ListBucket, S3 answers a GetObject for a key that does not exist with 403 AccessDenied
+# rather than 404 NoSuchKey. That is deliberate on S3's part: a caller who cannot list the bucket
+# must not be able to learn which keys exist by comparing 403 against 404. The cost is that a
+# missing file and a broken policy produce the identical error, and whoever reads it goes and
+# debugs IAM.
+#
+# Measured, by adding the permission two ways and invoking the function against a key that does
+# not exist:
+#
+#   no ListBucket                      403 "not authorized to perform: s3:ListBucket"
+#   ListBucket, prefix-conditioned     404 "The specified key does not exist"
+#   ListBucket, unconditioned          404 "The specified key does not exist"
+#
+# The prefix condition is enough, so the honest error message costs nothing: the function still
+# cannot enumerate anything outside covers/.
 echo "Writing the least-privilege inline policy..."
 aws iam put-role-policy --role-name "${ROLE}" --policy-name cover-processor-permissions \
   --policy-document "{
@@ -110,6 +129,13 @@ aws iam put-role-policy --role-name "${ROLE}" --policy-name cover-processor-perm
         \"Effect\": \"Allow\",
         \"Action\": [\"s3:GetObject\", \"s3:GetObjectVersion\"],
         \"Resource\": \"arn:aws:s3:::${BUCKET}/covers/*\"
+      },
+      {
+        \"Sid\": \"SoThatAMissingObjectIs404AndNot403\",
+        \"Effect\": \"Allow\",
+        \"Action\": \"s3:ListBucket\",
+        \"Resource\": \"arn:aws:s3:::${BUCKET}\",
+        \"Condition\": {\"StringLike\": {\"s3:prefix\": \"covers/*\"}}
       },
       {
         \"Sid\": \"WriteOneTable\",

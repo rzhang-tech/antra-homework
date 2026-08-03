@@ -279,6 +279,15 @@ Updated in the same commit as the step, which is the point of the last entry bel
   account and nothing in the project.
 - **The DLQ alarm lags by five to ten minutes**, because SQS publishes its depth metric on a
   five-minute cadence. Adequate for covers, and it would not be for anything a customer waits on.
+- **A test passed while testing something else, and I nearly shipped the note instead of the fix.**
+  The first DLQ demonstration failed at event *deserialization*, so the function's own code never ran —
+  the plumbing was proven and the thing the test existed for was not. The discrepancy was recorded
+  accurately in the README and then left there, which felt like rigour and was not: **an honest label
+  on a gap is not the same as closing it**, and the honesty is what made the shortcut feel principled
+  enough to stop thinking about. Redoing it properly took three minutes and turned up a second finding
+  — 403 versus 404 on `s3:ListBucket` — that the first version could never have surfaced. The rule
+  worth keeping: when a measurement does not measure what it was set up to measure, that is an open
+  action, not a footnote.
 - **Infrastructure is shell scripts rather than CloudFormation or Terraform** (D28). A stated shortcut,
   not a recommendation: nine resources did not justify also teaching a provisioning DSL, and the scripts
   are shaped so the translation is mechanical.

@@ -1451,22 +1451,58 @@ FAILED".
 ## Dead letter queue, and the alarm
 
 An asynchronous invocation that keeps failing is retried twice and then the **event** — not the error —
-is sent to an SQS queue. Demonstrated by invoking with a deliberately malformed event:
+is sent to an SQS queue.
 
 ```
 messages in the DLQ: 1
-  ErrorCode     200
-  ErrorMessage  An error occurred during JSON parsing
-  the event     key=covers/777777 versionId=does-not-exist
+  ErrorMessage  The specified key does not exist. (Service: S3, Status Code: 404)
+  errorType     software.amazon.awssdk.services.s3.model.NoSuchKeyException
+  RequestID     60e54166-2c52-415c-b923-ca9ce0ae103d
+  the event     key=covers/777777
 ```
-
-Worth being precise: that failure was a **deserialization** failure of a hand-written event, not the
-`NoSuchKey` it was meant to be. It exercises the same path and is arguably the better demonstration — a
-malformed message is exactly the deterministic failure retrying cannot fix — but it is not what the test
-was aiming at, and saying otherwise would be inventing a result.
 
 The original event is preserved, so it can be fixed and replayed by hand. That is the point of a DLQ:
 the poison message leaves the retry path without leaving the building.
+
+### The first version of this test passed while testing something else
+
+Worth keeping, because the failure mode is the interesting part. The first attempt used a hand-written
+event missing fields the `S3Event` type requires, and the DLQ duly received a message:
+
+```
+ErrorMessage  An error occurred during JSON parsing
+```
+
+That is a **deserialization** failure. The Lambda runtime could not build the input object, so
+`handleRequest` never ran — the S3 read, the conditional write and the publish were not executed at
+all. The DLQ *plumbing* was proven; the thing the test existed to prove, that **a failure inside the
+function's own code reaches the DLQ**, was not.
+
+The difference is not pedantic. This function deliberately swallows one exception — `ImageIO` failing on
+a format it cannot read — so a missing dimension does not stop the pipeline. Widen that `catch` by
+accident and a genuine S3 or DynamoDB failure would be swallowed too, reaching neither the retries nor
+the queue. **The first test could not have detected that, because it never reached the code.**
+
+### And doing it properly found something else
+
+The corrected test first failed with **403 AccessDenied on `s3:ListBucket`**, not the expected 404.
+
+That is S3 behaving correctly: without `s3:ListBucket`, a caller must not be able to learn which keys
+exist by comparing 403 against 404, so a missing object and a forbidden one are made
+indistinguishable. The cost is that a missing file and a broken policy produce the identical error, and
+whoever reads it goes and debugs IAM.
+
+Measured, rather than assumed, by granting the permission two ways:
+
+```
+no ListBucket                    403  "not authorized to perform: s3:ListBucket"
+ListBucket, prefix-conditioned   404  "The specified key does not exist"
+ListBucket, unconditioned        404  "The specified key does not exist"
+```
+
+The prefix-conditioned form is enough, so the readable error costs no extra privilege — the function
+still cannot enumerate anything outside `covers/`. It is in the provisioning script with that reasoning
+attached, so the next person does not delete it as unused.
 
 **A dead letter queue nobody watches is worse than none**, exactly as in 7d: it removes the *symptom*
 along with the failure. Before it, a failing invocation retried visibly in the error metric; after it,
