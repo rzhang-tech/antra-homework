@@ -170,15 +170,37 @@ kubectl apply -f "$K8S/60-autoscaling.yaml" -f "$K8S/70-monitoring.yaml"
 
 echo
 echo "==> waiting for the platform"
-# `kubectl wait` on a condition rather than a sleep, for the same reason compose used
-# `condition: service_healthy`. Expect CrashLoopBackOff on the way there: nothing orders these, so
-# every service starts before the config server answers, fails fast, and is restarted with backoff
-# until it succeeds. That is the ordering mechanism, not a symptom.
-kubectl wait --for=condition=ready pod --all --namespace "$NS" --timeout=600s || {
-  echo "not everything came up:"
+# WAIT ON ROLLOUTS, NOT ON PODS, and this replaced a line that worked until it did not.
+#
+# It used to be `kubectl wait --for=condition=ready pod --all`. That waits on every pod OBJECT in the
+# namespace, including ones a Deployment has already replaced and scaled away — a Failed pod from a
+# ReplicaSet at desired=0 still exists, still never becomes Ready, and so the wait times out forever.
+#
+# The consequence is worth stating: **once any pod had failed even once, every future deploy failed**,
+# reporting a broken platform while the platform was fine. Which is exactly what happened - a
+# 12-minute-old orphan from an earlier rollout failed a deploy whose own pods were all Running.
+#
+# `rollout status` asks the controller whether it converged, which is the actual question, and it is
+# blind to pods no controller owns any more.
+#
+# Expect CrashLoopBackOff on the way there on a cold cluster: nothing orders these, so a service can
+# start before the config server answers and be restarted until it succeeds. That is the ordering
+# mechanism, not a symptom (see 40-user-service.yaml).
+FAILED=0
+for OBJ in $(kubectl get deploy,statefulset -n "$NS" -o name); do
+  kubectl rollout status "$OBJ" -n "$NS" --timeout=600s || FAILED=1
+done
+
+if [[ "$FAILED" = "1" ]]; then
+  echo "not everything converged:"
   kubectl get pods -n "$NS"
   exit 1
-}
+fi
+
+# Tidy up pods no controller owns any more, so `kubectl get pods` shows the platform rather than its
+# history. Cosmetic here; it was load-bearing for the wait above until that stopped asking the wrong
+# question.
+kubectl delete pod -n "$NS" --field-selector=status.phase==Failed --ignore-not-found >/dev/null 2>&1 || true
 
 echo
 kubectl get pods -n "$NS"
