@@ -28,6 +28,12 @@ docker compose up -d
 
 (from `02-bookstore-capstone/` — starts **four** PostgreSQL instances and a Kafka broker)
 
+Since 10a each service also has an image, though nothing yet starts them as a stack:
+
+```bash
+./scripts/build-images.sh
+```
+
 **The config server starts first, and the other four will not start without it.** That is deliberate —
 see Step 6a — and it needs the encryption key, or the dev signing key in the repo cannot be decrypted:
 
@@ -1547,3 +1553,184 @@ cover after 400 days would be a feature nobody asked for.
 
 Eight services started by hand, in an order that matters, with a Kafka broker and four databases behind
 them. Containers and Kubernetes.
+
+---
+
+# Step 10a — eight images, and what a Dockerfile is actually deciding
+
+Nothing was containerised until now: `docker-compose.yml` held four databases and a broker, and the
+eight JVMs were eight terminals. Each service has a `Dockerfile` next to its `pom.xml`, and
+
+```bash
+./scripts/build-images.sh
+```
+
+produces all eight. **8 seconds** with everything cached, **96 seconds** from a warm Maven cache and
+cold layers.
+
+`cover-processor` deliberately has none. It is a Lambda, deployed as a jar; giving it an image would
+mean running a container to do the thing Lambda exists to do without one.
+
+## Two stages, measured against the one-stage version
+
+The naïve Dockerfile — one stage, a JDK, `java -jar` on the fat jar — was built as well, because
+"multi-stage is smaller" is worth a number rather than a claim:
+
+```
+one stage,  JDK base, fat jar     691 MB
+two stages, JRE base, layered     425 MB
+```
+
+**266 MB, 38%.** Almost all of it is the difference between `eclipse-temurin:21-jdk-alpine` (553 MB)
+and `21-jre-alpine` (286 MB) — a compiler, `jcmd`, `jstack`, `javadoc` and the full module source,
+shipped to production in the first version and absent from the second. The rest is the Maven
+repository and the service's own source tree, which the one-stage image carries because everything a
+build touches stays in its layers.
+
+The security half of that is the half worth caring about: an image containing a compiler is an image
+where anything that achieves execution can build and run whatever it likes.
+
+## Layering, and the number that makes it matter
+
+Spring Boot's layered format splits the fat jar by rate of change. A one-line change to a `.java` file,
+rebuilt both ways, comparing which layer digests moved:
+
+```
+layered      1 layer changed      262 kB
+fat jar      2 layers changed     74 MB + 291 kB
+```
+
+**262 kB against 74 MB**, for the same one-line change. The bytes inside the container are identical;
+the layer is the unit Docker caches, pushes and pulls, so this is the difference between a deploy that
+uploads a rounding error and one that uploads the whole dependency tree — every commit, per service,
+eight times over. It is also why `COPY` order in the runtime stage runs dependencies first and
+application last.
+
+A detail worth keeping from the same experiment: the **first** attempt changed only a comment, and
+*no layer moved at all*. `javac` discards comments, so the class files were byte-identical and the
+application layer kept its digest. The fat-jar image changed anyway, because it ships the source. An
+image that rebuilds identically from an unchanged program is a property, not a coincidence.
+
+Sharing works across services too, since all eight share a base and several share dependency sets:
+
+```
+sum of the eight image sizes      3346 MB
+actually on disk                  1348 MB unique + 211 MB shared base
+```
+
+## `-XX:MaxRAMPercentage=75` is a correctness fix, not tuning
+
+This is the container trap that costs an afternoon, so it was measured rather than asserted. The same
+image, in a 512 MB container, with and without the flag:
+
+```
+default                        MaxRAMPercentage 25    MaxHeapSize 134217728   (128 MiB)
+-XX:MaxRAMPercentage=75        MaxRAMPercentage 75    MaxHeapSize 402653184   (384 MiB)
+```
+
+A modern JVM does read the cgroup limit — that part works. What it then does with it is the trap: it
+takes **a quarter** of it. Give a service 512 MB and it runs a 128 MiB heap, GCs constantly, and
+eventually throws `OutOfMemoryError` with three quarters of its memory unused. The symptom is a service
+that is slow and then dies under exactly the load you provisioned for.
+
+75 rather than 90 because heap is not the JVM's whole footprint: metaspace, thread stacks, the code
+cache and direct byte buffers all live outside it, and a heap allowed to fill the cgroup gets the
+process killed by the kernel rather than by the JVM. An OOMKill leaves no Java stack trace and looks,
+from Kubernetes, exactly like a crash loop.
+
+## Three smaller decisions in the same file
+
+**Non-root**, verified rather than intended — `uid=100(app) gid=101(app)`. It also makes `/app`
+effectively read-only to the application without any flag, since root owns it.
+
+**The exec form of `ENTRYPOINT`.** With the shell form, PID 1 is `/bin/sh`, and `sh` does not forward
+signals. Kubernetes sends `SIGTERM` and waits 30 seconds before `SIGKILL`, so the shell form turns
+every rolling deploy into "all in-flight requests dropped" — with no error anywhere, because from the
+outside a killed pod and a drained one look the same.
+
+**`HEALTHCHECK` in the image, not only in compose.** An image that can say whether it is healthy is
+what lets 10b express "start user-service *after* the config server is answering" rather than "start it
+five seconds later". Kubernetes ignores `HEALTHCHECK` entirely and uses its own probes (10c) — so this
+line is for compose, and duplicating it there would have put the same URL in two files.
+
+## Why each service builds only itself
+
+The build context is `bookstore-platform/`, because a module's pom inherits from the parent pom. But
+only the parent pom and *one* module's sources are copied in:
+
+```dockerfile
+COPY .mvn/ .mvn/
+COPY mvnw pom.xml ./
+COPY user-service/ user-service/
+RUN ... ./mvnw -B -q -f user-service/pom.xml -DskipTests package
+```
+
+`COPY . .` would be one line shorter and would mean **an edit to analytics-service invalidates
+user-service's build cache** — eight images rebuilt because one unrelated service changed.
+
+`-f user-service/pom.xml` rather than the more usual `-pl user-service -am`: the aggregator lists nine
+modules and refuses to build a reactor whose directories are missing, whereas resolving a parent by
+`relativePath` needs only the parent pom. And `--mount=type=cache,target=/root/.m2` keeps the
+dependency downloads out of the image entirely — they are already inside the jar — while making a
+rebuild after a code change re-resolve nothing.
+
+## The one thing in these files that could be wrong
+
+**`-DskipTests`.** The tests need Testcontainers, which needs a Docker daemon inside the build. Running
+them here means docker-in-docker for a suite that already runs green outside, and the honest cost is
+stated rather than hidden: **nothing currently stops an image being built from code that fails its
+tests.** Step 11's pipeline is where a failing test fails the build; until then "it built" means only
+"it compiled".
+
+## The two services whose Dockerfile is genuinely different
+
+**config-server** copies `config-repo/` into the image and sets `CONFIG_REPO=file:/config-repo`,
+because the `native` profile serves files from a directory and a container has no working directory two
+levels up. That is a development shortcut and is labelled as one: an image is immutable, so a baked-in
+config repo means changing a value requires rebuilding and redeploying the config server — the exact
+property Step 6 existed to remove. The `git` profile is in the same image and is what a real deployment
+runs.
+
+It does **not** contain `ENCRYPT_KEY`, and never will. A master key in an image layer is a master key in
+a registry, readable by anyone who can pull the tag, shipped next to the ciphertext it protects.
+
+Proven end to end, with the key supplied at run time:
+
+```
+docker run -e ENCRYPT_KEY=... bookstore/config-server        healthy in 8s
+GET /user-service/dev  ->  app.jwt.secret  w4HvWMieqVUX1LJpx/wVR+yANNMPgD/dwfEySBsQuZyr7nej+tEV7aZkrzB12Ip3
+```
+
+Decrypted from `{cipher}`, inside a container, by a server holding a key that is in no layer.
+
+The same response shows exactly what 10b has to solve:
+
+```
+spring.datasource.url   jdbc:postgresql://localhost:5433/userdb
+```
+
+Inside a container `localhost` is the container. Every address on this platform is currently written
+from a laptop's point of view.
+
+**api-gateway** exposes two ports and health-checks the second one. 8080 is the public front door;
+9090 serves actuator, where Step 8c moved it after `curl localhost:8080/actuator/env` returned the
+platform's configuration on the one component facing the internet. A health check written against 8080
+would get a 404 forever — there is no route for it, which *is* the property.
+
+## Eight near-identical files, on purpose
+
+Five of the eight Dockerfiles differ only in a module name, a port and a health URL. A single
+parameterised build file taking `ARG SERVICE` would remove the duplication, and is not used, for the
+reason a shared jar is not used (D12): **the shared file becomes something all eight services must
+agree on.** api-gateway already needs a second port and a different health URL; config-server needs a
+copied directory and an environment variable. Two of eight have escaped the template already, which is
+the usual fate of build templates — and each escape in a shared file is a conditional that every other
+service then carries. A service owns its own build (D29).
+
+## What got worse
+
+- **The images are built from untested code**, stated above and unfixed until Step 11.
+- **`:latest` on eight images.** It is the tag that cannot be rolled back to, because it means something
+  different tomorrow. Step 11 tags by commit SHA and this becomes a convenience alias.
+- **Nothing runs yet.** Eight images that each start, fail to reach a config server on `localhost`, and
+  exit. That is 10b.

@@ -1,0 +1,22 @@
+# What must NOT be sent to the Docker daemon as build context.
+#
+# The build context is `bookstore-platform/` for every service, and it is copied over a socket before
+# the first instruction runs. Without this file that copy includes every module's `target/` — nine
+# builds' worth of jars and class files, several hundred megabytes — none of which the build stage
+# uses, because the build stage compiles from source inside the image.
+#
+# The second, quieter reason: a file that reaches the context can be COPYed in by accident. A stale
+# `target/classes/application-dev.yml` baked into an image would be the Step 6d ghost-file bug again,
+# except this time immutable and shipped.
+
+target/
+*/target/
+.git
+.gitignore
+.idea
+*.iml
+
+# Not source. The Lambda has no image (it is deployed as a jar), and the AWS scripts run from a laptop.
+cover.png
+test-platform.http
+README.md

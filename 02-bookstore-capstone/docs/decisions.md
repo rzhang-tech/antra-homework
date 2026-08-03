@@ -679,6 +679,49 @@ provisioning scripts: if teardown misses something, the scripts created somethin
 **One thing the scripts deliberately do not do:** subscribe an email address to the SNS topic. Sending
 somebody a confirmation email is not something a provisioning script should do behind your back; the
 command is printed instead.
+
+---
+
+## D29 — A Dockerfile per service, not one parameterised build file
+
+**Decision.** Eight `Dockerfile`s, one beside each service's `pom.xml`. Five of them differ only in a
+module name, a port and a health URL.
+
+**Why not `ARG SERVICE` in a single file.** The same reason there is no shared jar (D12): a shared build
+file becomes something all eight deployables must agree on, and every service-specific need becomes a
+conditional the other seven carry. Two of the eight have already escaped the template — api-gateway
+needs a second port and health-checks it instead of the public one, config-server copies a directory in
+and sets an environment variable. That is the usual fate of build templates, and it happened before the
+step was finished.
+
+**What it costs.** Real duplication. A change to the base image, the JVM flags or the layering scheme is
+eight edits, and nothing enforces that they stay identical. Accepted because the alternative couples the
+build of every service to the needs of the most demanding one, and because build files change rarely
+while the coupling would be permanent.
+
+**The general shape.** Duplication between things that are independently deployable is usually cheaper
+than the coordination that removes it. Duplication *inside* one deployable usually is not.
+
+---
+
+## D30 — Images are built with `-DskipTests`, and that is a gap until Step 11
+
+**Decision.** The build stage runs `package -DskipTests`. Nothing in the image build verifies the code.
+
+**Why.** The suite uses Testcontainers, which needs a Docker daemon *inside* the build. Docker-in-docker
+for a suite that already runs green on the host is a large amount of machinery for a guarantee this
+project gets elsewhere.
+
+**What it gives up, stated plainly.** Nothing currently stops an image being built from code that fails
+its tests, so **"it built" means only "it compiled"**. That is a real hole, not a technicality: the
+whole argument for Step 4 coming before Step 5 was that tests guard a refactor, and an image build that
+skips them is a way to ship past that guard.
+
+**Where it is closed.** Step 11's pipeline runs `./mvnw test` as a stage before the image is built, so
+a failing test fails the pipeline and no image is produced. The test gate belongs in CI rather than in
+the Dockerfile anyway — it should run once per commit, not once per image, and eight images per commit
+would otherwise run the same suite eight times.
+
 ---
 
 ## D5 — Cross-service references are plain IDs, not foreign keys
