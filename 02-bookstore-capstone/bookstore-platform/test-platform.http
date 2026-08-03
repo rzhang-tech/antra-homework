@@ -664,3 +664,71 @@ GET {{gateway}}/api/books/3/cover
 ###   aws s3api list-object-versions --bucket <bucket> --prefix covers/2 -> 2 versions
 ###     one object, two versions: the deterministic key REPLACED in place, and the
 ###     previous cover is still recoverable because the bucket is versioned.
+
+### ---------------------------------------------------------------------------
+### Step 9c/9d — the Lambda pipeline
+### ---------------------------------------------------------------------------
+###
+###   cd ../scripts/aws
+###   ./cover-pipeline-infra.sh && ./deploy-cover-processor.sh && ./s3-lifecycle-policy.sh
+###
+### Then subscribe an address so the emails have somewhere to go - the script does
+### not do this for you, because sending somebody a confirmation email is not a
+### provisioning script's decision:
+###
+###   aws sns subscribe --topic-arn arn:aws:sns:<region>:<account>:bookstore-cover-events \
+###       --protocol email --notification-endpoint you@example.com
+
+### 53. Upload a cover and then watch three things happen without this request
+### waiting for any of them: a CoverMetadata row appears, an email is sent, and
+### the S3 object gains a new version.
+POST {{gateway}}/api/books/4/cover
+Authorization: Bearer {{adminToken}}
+Content-Type: multipart/form-data; boundary=----Boundary
+
+------Boundary
+Content-Disposition: form-data; name="file"; filename="cover.png"
+Content-Type: image/png
+
+< ./cover.png
+------Boundary--
+
+###
+### What the Lambda wrote (width and height are read out of the IMAGE, not off the
+### request - the uploader's claims are not evidence):
+###
+###   aws dynamodb get-item --table-name CoverMetadata --key '{"bookId":{"S":"4"}}'
+###
+###     sizeBytes 44371 | contentType image/png | width 120 | height 180
+###     processedVersion ARGfg9H9NLcjVL8x4Yj_YaP_7RXxbuyM
+###
+### IDEMPOTENCY - replay the exact same event and nothing happens twice:
+###
+###   aws lambda invoke --function-name bookstore-cover-processor \
+###     --cli-binary-format raw-in-base64-out --payload file://replay.json out.json
+###
+###     -> "processed=0 skipped=1", processedAt byte-identical, no second email
+###
+### A GENUINE re-upload is a new S3 version, so it DOES update and DOES email -
+### an administrator who replaced a wrong cover wants to know it was processed:
+###
+###     sizeBytes 44371 -> 78, dimensions 120x180 -> 10x10, rows in table: still 1
+###
+### THE DEAD LETTER QUEUE. Invoke asynchronously with an event that cannot succeed;
+### Lambda retries twice, then the ORIGINAL EVENT (not the error) lands here:
+###
+###   aws sqs receive-message --queue-url $(aws sqs get-queue-url \
+###       --queue-name bookstore-cover-processor-dlq --query QueueUrl --output text) \
+###       --message-attribute-names All
+###
+###     ErrorMessage "An error occurred during JSON parsing"
+###     the event    key=covers/777777
+###
+### The event is preserved so it can be fixed and replayed by hand. The CloudWatch
+### alarm fires at threshold ZERO - nothing consumes this queue, a human does, so
+### its healthy depth is not "low", it is empty. It lags five to ten minutes,
+### because SQS publishes that metric on a five-minute cadence.
+
+### 54. Tear everything down when the demo is over.
+###   cd ../scripts/aws && ./teardown.sh          # shows what would go
+###   cd ../scripts/aws && ./teardown.sh --yes    # actually deletes

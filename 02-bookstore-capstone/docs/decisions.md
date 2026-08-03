@@ -592,6 +592,95 @@ thinking about, and false for the one that mattered. When a guard is a filter, t
 not "is it correct?" but "what reaches this process without passing through it?"
 ---
 
+## D26 — DynamoDB for one access pattern, PostgreSQL for everything else
+
+**Decision.** Browsing history and cover metadata go in DynamoDB. Books, orders, users and payments stay
+in PostgreSQL.
+
+**Why, given book-service already owns a relational database.** The access pattern, not the technology:
+
+- **Write-heavy and unbounded.** Every page view is a row. History grows faster than the catalogue by
+  orders of magnitude and grows forever until something deletes it.
+- **Exactly one query, ever.** "The most recent N views for one user." No joins, no reporting, no ad-hoc
+  filtering. A table with one access pattern is what a key-value store is for.
+- **Expiry is a feature.** DynamoDB's TTL deletes old items at no cost. The PostgreSQL equivalent is a
+  nightly `DELETE` competing with live traffic, leaving a bloated table until it is vacuumed.
+
+Putting it in `bookdb` would have worked and would have grown forever alongside the data that actually
+matters — with the catalogue's backups and its restore time growing to match.
+
+**The key design is the whole decision, because it cannot be changed later.** A partition key spreads
+load and is the only way in; `userId` gives many independent modest streams. `bookId` would make a
+best-seller a hot partition — DynamoDB throttles **per partition**, not per table — and a date key would
+put a whole day's writes on one shard. Adding an index to PostgreSQL is a migration; changing a
+DynamoDB partition key is a new table and a backfill.
+
+**What it costs.** No joins, no ad-hoc queries, no `ORDER BY` on anything but the sort key, and a
+migration story that Flyway does not provide. "Show me the ten most-viewed books this week" is not a
+question this table can answer, and answering it means a second table populated by a stream.
+
+---
+
+## D27 — Idempotency by deterministic key plus conditional write
+
+**Decision.** The S3 object key is `covers/{bookId}`, the `CoverMetadata` primary key is `bookId`, and
+the Lambda's write is conditional on the S3 object **version** it has already processed.
+
+**Why it is needed.** S3 event delivery is at-least-once and a failed Lambda is retried automatically.
+Two things have to survive that: the row, and the email.
+
+**Two mechanisms, two jobs.** The primary key makes the *row* idempotent — one book, one row, forever,
+so a redelivery updates rather than inserting and no cleanup job is ever required. The condition makes
+the *email* idempotent — a redelivery of the same version writes nothing and sends nothing, while a
+genuine re-upload passes, because an administrator who replaced a wrong cover wants to know.
+
+**Why the key is derived rather than generated.** Everything reduces to a string book-service already
+had to choose. A UUID per upload would work only if it were carried through S3 metadata into the
+Lambda and back out, and an idempotency key that has to be carried is one somebody eventually forgets
+(D21). Deriving it from the object key means there is nothing to forget.
+
+**Why the condition rather than a read-then-write.** Two concurrent invocations of the same event would
+both pass a check-then-act. Only one can win a conditional write, and the database enforces it rather
+than the function promising it.
+
+**Write before publish.** Reversed, a crash between them sends an email and leaves no record, so the
+retry sends a second one. The ordering that costs at most a missing email beats the one that costs a
+duplicate — 5d's "release before marking FAILED" applied to a different pair of steps.
+
+**Measured:** replaying the identical event returned `processed=0 skipped=1` and left `processedAt`
+byte-identical; a real re-upload changed 44371 bytes / 120x180 to 78 bytes / 10x10 in the same single
+row.
+
+---
+
+## D28 — Infrastructure as re-runnable scripts, with a teardown that is part of the deliverable
+
+**Decision.** Every AWS resource is created by a script in `scripts/aws/`, each idempotent, and
+`teardown.sh` deletes all of them.
+
+**Why not console clicks.** A resource created by clicking exists in exactly one account and is
+described nowhere. The scripts are the only documentation of what the platform needs that is guaranteed
+to match what it has, and they are reviewable in a pull request.
+
+**Why not CloudFormation/CDK/Terraform.** They are the right answer for anything long-lived, and the
+honest reason they are not here is scope: this is nine resources across four services, and a capstone
+that also taught a provisioning DSL would teach neither well. The scripts are deliberately shaped like
+what they would become — one file per concern, no shared mutable state, safe to re-run — so the
+translation is mechanical. **This is a stated shortcut, not a recommendation.**
+
+**Why idempotent matters more here than in application code.** A provisioning script you are afraid to
+re-run is one you will edit by hand under pressure, and the hand-edit is what stops being written down.
+Each script checks before it creates and reports what already exists.
+
+**Why teardown is not optional.** A capstone that leaves resources running sends somebody a bill, and
+"it only costs cents" is a statement about today's usage. It is also the honest test of the
+provisioning scripts: if teardown misses something, the scripts created something nobody wrote down.
+
+**One thing the scripts deliberately do not do:** subscribe an email address to the SNS topic. Sending
+somebody a confirmation email is not something a provisioning script should do behind your back; the
+command is printed instead.
+---
+
 ## D5 — Cross-service references are plain IDs, not foreign keys
 
 **Decision.** `order_item.book_id` and `orders.user_id` are plain `BIGINT` columns with no FK constraint.

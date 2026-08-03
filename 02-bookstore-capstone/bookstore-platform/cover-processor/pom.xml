@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.example</groupId>
+        <artifactId>bookstore-platform</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>cover-processor</artifactId>
+    <name>cover-processor</name>
+    <description>AWS Lambda: turns an uploaded cover into metadata and a notification</description>
+
+    <!--
+      NOT a Spring Boot application, and the only module here that is not.
+
+      There is no application context, no dependency injection, and no starter - a Lambda is a class
+      with a method, and every framework it loads is added to a cold start that a customer waits for.
+      The AWS SDK clients below are static so they survive between invocations on a warm container,
+      which is the single most effective thing you can do to a Java Lambda's latency.
+
+      It is a module of this build because one `./mvnw test` should cover everything, and because its
+      contract with book-service - the `covers/{bookId}` key - is not checked by any compiler and
+      needs a test on the same clock as the code that produces it. The trade is that a Lambda is
+      genuinely a separate deployable with its own lifecycle, and building it with the platform
+      slightly hides that.
+    -->
+
+    <properties>
+        <aws-lambda-core.version>1.4.0</aws-lambda-core.version>
+        <aws-lambda-events.version>3.16.0</aws-lambda-events.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.amazonaws</groupId>
+            <artifactId>aws-lambda-java-core</artifactId>
+            <version>${aws-lambda-core.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.amazonaws</groupId>
+            <artifactId>aws-lambda-java-events</artifactId>
+            <version>${aws-lambda-events.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>dynamodb</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sns</artifactId>
+        </dependency>
+
+        <!--
+          The SDK defaults to Netty/Apache HTTP, which pulls a large dependency tree and starts
+          threads a Lambda has no use for. UrlConnectionHttpClient is the JDK's own client: smaller
+          jar, faster cold start, and this function makes three sequential calls and needs no
+          connection pooling at all.
+        -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>url-connection-client</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+              A Lambda needs one jar containing everything, and spring-boot-maven-plugin's layout is
+              not it: Boot's executable jar nests dependencies under BOOT-INF and needs its own
+              launcher to read them, which the Lambda runtime does not use. Shade flattens.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <!--
+                              combine.self="override" because spring-boot-starter-parent already
+                              manages this plugin and contributes its own transformers for Spring's
+                              META-INF/spring.* files. Maven MERGES plugin configuration by default,
+                              and the merged result assigned Boot's <resource> element to this
+                              transformer - which does not have one. Overriding is right here anyway:
+                              this jar contains no Spring at all.
+                            -->
+                            <transformers combine.self="override">
+                                <!--
+                                  The AWS SDK ships service-loader files under META-INF/services with
+                                  the same names in several jars. Without this transformer the last
+                                  one copied wins and the others are lost, and the symptom is an
+                                  SdkClientException about not finding an HTTP implementation - at
+                                  runtime, in a Lambda, where it is least convenient to debug.
+                                -->
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
+                            <filters combine.self="override">
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>module-info.class</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>

@@ -36,6 +36,8 @@
         <module>payment-service</module>
         <module>notification-service</module>
         <module>analytics-service</module>
+        <!-- Not a service. A Lambda, built here so one command covers everything. -->
+        <module>cover-processor</module>
     </modules>
 
     <properties>

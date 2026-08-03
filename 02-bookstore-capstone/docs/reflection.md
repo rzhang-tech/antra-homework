@@ -257,6 +257,34 @@ Mostly a step that *closed* gaps rather than opening them. What it left:
 
 ---
 
+## Step 9 — S3, Lambda and DynamoDB
+
+Updated in the same commit as the step, which is the point of the last entry below.
+
+- **The platform now has state this repository cannot recreate.** Dropping `UserBrowsingHistory` loses
+  every view with no migration to replay. Flyway's guarantee for PostgreSQL has no equivalent here: the
+  provisioning scripts describe *structure* and never contents. A real system exports to S3 on a
+  schedule, or accepts that history is disposable and says so out loud.
+- **Every AWS interaction is asserted against a mock.** A test needing an AWS account is a test that
+  does not run in CI, so the request shapes are pinned and the round trip is demonstrated by hand. What
+  that leaves unchecked is exactly what broke most often: whether the table exists with those keys, and
+  whether the environment's credentials can reach it. DynamoDB Local via Testcontainers, plus LocalStack
+  for S3, would close most of the gap and is a day's work.
+- **The Lambda's contract with book-service is a string format with two implementations.**
+  `CoverStorageService.keyFor` builds `covers/{bookId}`; `CoverProcessor.bookIdFrom` takes it apart.
+  There are tests on both sides, and nothing makes them fail *together* — if they drift the pipeline
+  stops silently, with the object landing, the event firing, and no metadata or email appearing.
+- **Cost became a property of correctness, and nothing watches it.** A hot partition, a missing TTL or a
+  forgotten lifecycle rule does not fail — it bills. There is a manually-created budget alarm on the
+  account and nothing in the project.
+- **The DLQ alarm lags by five to ten minutes**, because SQS publishes its depth metric on a
+  five-minute cadence. Adequate for covers, and it would not be for anything a customer waits on.
+- **Infrastructure is shell scripts rather than CloudFormation or Terraform** (D28). A stated shortcut,
+  not a recommendation: nine resources did not justify also teaching a provisioning DSL, and the scripts
+  are shaped so the translation is mechanical.
+
+---
+
 ## Things I would do differently if starting over
 
 - **Model `Author` from the first schema** (Step 1), rather than splitting it across two steps.
@@ -268,7 +296,8 @@ Mostly a step that *closed* gaps rather than opening them. What it left:
 - **Set up JaCoCo in Step 4.** Not for a badge — for the threshold that fails a build, which is the only
   part that changes behaviour.
 - **Keep this file current per step.** It went seven steps without an update while `roadmap.md` and
-  `decisions.md` were maintained. The material was never missing — every "What got worse" section in
+  `decisions.md` were maintained. Step 9's entry above was written in the same commit as Step 9, which
+  is what the rest of this list should have looked like. The material was never missing — every "What got worse" section in
   `bookstore-platform/README.md` is raw material for this document — but assembling it in one pass at
   Step 8 is exactly the "written at the end" failure the header warns about.
 

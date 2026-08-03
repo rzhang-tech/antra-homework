@@ -15,8 +15,8 @@ Legend: ☐ not started · ◐ in progress · ☑ done
 | 6 | Central configuration | Spring Cloud Config Server | ☑ |
 | 7 | Async messaging | Kafka, `@KafkaListener`, DLT | ☑ |
 | 8 | Single front door | Spring Cloud Gateway | ☑ |
-| 9 | Serverless file processing + browsing history | S3, Lambda, DynamoDB, SES/SNS | ◐ |
-| 10 | Containerization & orchestration | Docker, Docker Compose, Kubernetes/EKS | ☐ |
+| 9 | Serverless file processing + browsing history | S3, Lambda, DynamoDB, SES/SNS | ☑ |
+| 10 | Containerization & orchestration | Docker, Docker Compose, Kubernetes/EKS | ◐ |
 | 11 | CI/CD & monitoring | GitHub Actions, Actuator, CloudWatch | ☐ |
 
 ## Why this order

@@ -18,6 +18,7 @@ git checkout step-4-monolith
 | `payment-service` | 8084 | `paymentdb` on 5436 | ☑ 5e |
 | `notification-service` | 8085 | none | ☑ 7a |
 | `analytics-service` | 8086 | none | ☑ 7b |
+| `cover-processor` | — | `CoverMetadata` (DynamoDB) | ☑ 9c — an AWS Lambda, not a service |
 
 ## Run it
 
@@ -66,6 +67,19 @@ And the front door, which from Step 8 is the only address a client needs:
 cd api-gateway && ../mvnw spring-boot:run
 ```
 
+Step 9 needs AWS. Once, with credentials configured (`aws configure`):
+
+```bash
+cd ../scripts/aws && ./dynamodb-browsing-history.sh && ./s3-covers-bucket.sh
+```
+
+```bash
+./cover-pipeline-infra.sh && ./deploy-cover-processor.sh && ./s3-lifecycle-policy.sh
+```
+
+Every script is idempotent. When you are finished, `./teardown.sh --yes` removes all of it — a capstone
+that leaves resources running sends somebody a bill.
+
 Then work through [test-platform.http](test-platform.http), which exercises the boundary itself: a token
 minted on 8081, accepted on 8082.
 
@@ -75,7 +89,7 @@ Everything at once:
 ./mvnw test
 ```
 
-122 tests across the eight modules. Testcontainers supplies the databases, and no test talks to the
+139 tests across the nine modules. Testcontainers supplies the databases, and no test talks to the
 config server, so nothing needs to be running.
 
 Run `./mvnw clean` at least once after pulling Step 6: `target/classes` keeps a copy of every resource
@@ -1229,7 +1243,271 @@ of its tests failed — the filter proving it was in the request path rather tha
   every service, and it is the first thing on the Step 11 list.
 - **Nothing rate-limits.** The edge is the only place that could, and it does not.
 
-## Next — Step 9
+---
 
-Cover images have to go somewhere, resizing them is bursty and stateless, and browsing history is a
-write-heavy single-key access pattern. S3, Lambda and DynamoDB.
+# Step 9 — two features that happen to live on AWS
+
+Not a deployment step. Three new endpoints in book-service, one Lambda, two DynamoDB tables, a bucket
+and a topic — feature work whose infrastructure is managed rather than run.
+
+Everything below was created by the scripts in [scripts/aws](../scripts/aws) and measured against the
+real account. `teardown.sh` removes all of it.
+
+## Feature B first, deliberately
+
+Browsing history (9a) was built before cover processing (9b–9c) because it is the same integration with
+the fewest moving parts: one table, one SDK, no events, no IAM role, no Lambda. When the first AWS call
+fails — and the first one always does — the question worth being able to answer is "is it my
+credentials, my region, or my code", and a step with three of those four removed answers it quickly.
+
+## Browsing history
+
+Every book view by a logged-in customer is recorded; `GET /api/books/me/history` returns recent views
+newest-first. Measured through the gateway:
+
+```
+GET /api/books/2   200 in 0.337s     first call - SDK and TLS warm-up
+GET /api/books/3   200 in 0.027s
+GET /api/books/4   200 in 0.024s
+GET /api/books/2   200 in 0.024s     no token at all
+
+GET /api/books/me/history  ->  2, 4, 3, 2     newest first
+```
+
+And read straight out of DynamoDB rather than trusted from the API:
+
+```
+bookId 2 | viewedAt 2026-08-02T23:04:41.890766400Z | expiresAt 1788303881 -> 2026-09-01
+table Count: 4
+```
+
+**Four items, not five.** The anonymous read wrote nothing: there is no partition key for a person who
+has not said who they are, and defaulting to one would file somebody's views under somebody else's.
+
+### The keys
+
+| | why |
+|---|---|
+| **`userId`** partition key | Many users, each a modest independent stream, so writes spread evenly and no partition is hot. It is also the only question ever asked of this table. `bookId` would make a best-seller a hot partition — DynamoDB throttles **per partition**, not per table — and a date would put every write of the day on one partition, the hottest key possible. |
+| **`viewedAt`** sort key | ISO-8601 UTC, because DynamoDB orders sort keys **as strings** and ISO-8601's lexicographic order is its chronological order. A local timestamp, an offset like `+05:00`, or epoch millis as a string would each sort plausibly and wrongly. |
+| `ScanIndexForward=false` | Reads the sort key backwards, so `limit` applies to the **newest** items. Ascending with a limit returns the ten oldest; ascending without one reads the user's entire history to show ten rows, and gets slower every day they use the site. |
+
+### Three things that fail silently
+
+- **TTL is epoch SECONDS in a NUMBER attribute.** DynamoDB ignores a TTL attribute of the wrong type
+  without complaining, and milliseconds would set expiry to the year 33658 — the table grows forever
+  and nothing reports a problem. The test asserts the **digit count**, because a range check passes for
+  millis if the expectation is also millis.
+- **TTL is not a query guarantee.** DynamoDB deletes expired items on its own schedule, typically within
+  48 hours, and returns them from queries until it does. The `FilterExpression` on `expiresAt` is the
+  actual correctness boundary, not belt-and-braces.
+- **Spring Boot's default `@Async` executor is `SimpleAsyncTaskExecutor`**, which starts a new thread
+  per task without limit. Under the traffic spike where recording a view matters, that is a thread per
+  request until the JVM dies.
+
+### The rejection policy is a business decision
+
+The executor is bounded in **both** pool and queue — a bounded pool with an unbounded queue is
+unbounded memory with extra steps — and **discards** on rejection:
+
+| policy | what it costs |
+|---|---|
+| `CallerRunsPolicy` | the request thread does the DynamoDB write, so the catalogue read is now as slow as DynamoDB — precisely what doing this asynchronously avoids |
+| `AbortPolicy` (default) | the same, plus an exception in a read path that has nothing to do with history |
+| **`DiscardPolicy`** | one row missing from a list nobody audits |
+
+Discard is right here and would be indefensible for an order, a payment or an audit log. What it must
+not be is silent, hence the logged handler: a feature that quietly stops working under load is
+indistinguishable from one that works.
+
+## Covers on S3
+
+`POST /api/books/{id}/cover` (ADMIN) uploads; `GET /api/books/{id}/cover` (PUBLIC) redirects.
+
+```
+POST no token / USER / ADMIN      401 / 403 / 204
+GET  cover, no token              302 -> S3 -> 200, 78 bytes, image/png, byte-identical
+GET  cover of a book without one  404
+```
+
+### The object key is `covers/{bookId}` and everything rests on it
+
+Deterministic — no UUID, no timestamp, **no extension**. After two uploads:
+
+```
+list-objects-v2       --prefix covers/    ->  1 object
+list-object-versions  --prefix covers/2   ->  2 versions
+```
+
+One object, two versions: replaced in place, previous recoverable because the bucket is versioned. A
+random key would leave the old cover behind and make "the cover of book 42" need a lookup table — and,
+more importantly, the Lambda derives its DynamoDB key from this same string, so a redelivered event and
+a genuine re-upload must produce the **same** key or the pipeline gets a second row and a second email.
+An idempotency key that has to be generated and carried is one somebody eventually forgets (D21).
+
+No extension for a smaller version of the same reason: `covers/42.png` and `covers/42.jpg` are two
+objects. The content type travels as S3 object metadata, which also makes the object self-describing —
+`head-object` shows `Metadata {"book-id": "2"}`.
+
+### Upload and download are deliberately asymmetric
+
+**Upload streams through the service** because the bytes must be checked before they are accepted:
+role, content type, size, and that the book exists. A presigned PUT — the scalable shape — hands the
+client a URL that bypasses all four.
+
+**Download redirects to a presigned GET**, because streaming an image through a Java service costs a
+thread and the service's bandwidth for the whole transfer, which is exactly the workload S3 exists to
+take off you. Presigning makes **no network call**: it is an HMAC over a canonical request, computed
+locally, so the service does microseconds of work and S3 does the megabytes.
+
+What that gives up, stated: a presigned URL works for anyone holding it until it expires. Fine for a
+cover the requirement makes public; it would need considerably more thought for a private object, and
+*"it is only a signed URL"* is how private objects end up in a chat log.
+
+### Three status codes that were wrong
+
+| | was | is | why |
+|---|---|---|---|
+| a `text/plain` file | 500 | **400** | `IllegalArgumentException` was unmapped. A 500 is the server claiming a bug it does not have, and sends whoever reads the log to debug the wrong thing (5b). |
+| a 6MB file, limit 5MB | 500 | **413** | Not 400 either: the request was perfectly well formed, it was simply too big, and 413 tells a client something it can act on. |
+| cover for book 9999 | — | **404** | Checked *before* the put, so no orphaned object and no email about a book that is not in the catalogue. |
+
+## The Lambda
+
+S3 `ObjectCreated` on `covers/` triggers a Java 21 function that reads the object, extracts its facts,
+writes `CoverMetadata`, and publishes to SNS. book-service does not know it exists and does not wait for
+it — the upload returned 204 before the function was invoked, which is Step 7's decoupling bought with
+an event source instead of a broker.
+
+```
+bookId            4
+objectKey         covers/4
+sizeBytes         44371
+contentType       image/png
+width             120          <- read out of the image, not off the request
+height            180
+processedAt       2026-08-02T23:46:31.646273391Z
+processedVersion  ARGfg9H9NLcjVL8x4Yj_YaP_7RXxbuyM
+```
+
+### Idempotency, measured
+
+Replaying the **exact same event** — same object, same version:
+
+```
+returned: "processed=0 skipped=1"
+processedAt before: 2026-08-02T23:46:31.646273391Z
+processedAt after:  2026-08-02T23:46:31.646273391Z    unchanged
+```
+
+A **genuine re-upload** — different image, new version:
+
+```
+sizeBytes    44371 -> 78
+dimensions   120x180 -> 10x10
+rows in CoverMetadata: 1     updated, not duplicated
+```
+
+Two mechanisms, doing different jobs:
+
+- **The primary key is `bookId`**, so one book has one row forever. A redelivery *updates* rather than
+  inserting, and no cleanup job is ever needed.
+- **The write is conditional** on `attribute_not_exists(bookId) OR processedVersion <> :version`, so a
+  redelivery of the same version writes nothing and sends nothing. A new version passes, because an
+  administrator who replaced a wrong cover wants to know the new one was processed.
+
+Enforced by the database rather than by a read-then-write in the function: two concurrent invocations of
+the same event would both pass a check-then-act, and only one can win a conditional write.
+
+**The write happens before the publish**, deliberately. Reversed, a crash between them would send an
+email and leave no record, so the retry would send a second one. The ordering that costs at most a
+missing email beats the one that costs a duplicate — the same reasoning as 5d's "release before marking
+FAILED".
+
+### Lambda details that are not obvious
+
+- **512 MB, not the 128 MB default, and it is not about memory.** Lambda allocates CPU *in proportion*
+  to memory, so a 128 MB function gets roughly a tenth of a core — and a JVM cold start on a tenth of a
+  core is measured in many seconds. Raising memory on a Java Lambda usually makes it **cheaper**,
+  because billing is memory × duration and duration falls faster than memory rises.
+- **SDK clients are `static`.** AWS reuses a warm container, so a static initialiser runs once per
+  container rather than once per event. For a client that resolves credentials and warms TLS that is
+  the difference between a 3-second cold start and a 40 ms warm one.
+- **`UrlConnectionHttpClient`** instead of the SDK's default Netty: smaller jar, faster cold start, and
+  this function makes three sequential calls and needs no connection pooling.
+- **The execution role is written out by hand**, naming every resource. This is the one place in the
+  project where least privilege is practised rather than discussed: `AmazonS3FullAccess` would have
+  worked and would have given an image-processing function the ability to delete every bucket in the
+  account.
+- **Two permission directions.** The execution role says what the function may do; `add-permission`
+  says who may *invoke* it. Forgetting the second produces a bucket notification AWS accepts and never
+  fires, which looks exactly like a Lambda that is mysteriously not being triggered.
+- **`URLDecoder` on the key.** S3 URL-encodes it in the event, so `covers/1 2` arrives as `covers/1+2`
+  and the symptom is a `NoSuchKey` for an object that plainly exists.
+- **The event's `versionId` is read, not "whatever is there now".** Two uploads in quick succession
+  would otherwise both read the second image, and the metadata for the first version would describe the
+  second.
+
+## Dead letter queue, and the alarm
+
+An asynchronous invocation that keeps failing is retried twice and then the **event** — not the error —
+is sent to an SQS queue. Demonstrated by invoking with a deliberately malformed event:
+
+```
+messages in the DLQ: 1
+  ErrorCode     200
+  ErrorMessage  An error occurred during JSON parsing
+  the event     key=covers/777777 versionId=does-not-exist
+```
+
+Worth being precise: that failure was a **deserialization** failure of a hand-written event, not the
+`NoSuchKey` it was meant to be. It exercises the same path and is arguably the better demonstration — a
+malformed message is exactly the deterministic failure retrying cannot fix — but it is not what the test
+was aiming at, and saying otherwise would be inventing a result.
+
+The original event is preserved, so it can be fixed and replayed by hand. That is the point of a DLQ:
+the poison message leaves the retry path without leaving the building.
+
+**A dead letter queue nobody watches is worse than none**, exactly as in 7d: it removes the *symptom*
+along with the failure. Before it, a failing invocation retried visibly in the error metric; after it,
+the function reports success and the event sits in a queue nobody has opened. So there is a CloudWatch
+alarm at **threshold 0** — nothing consumes this queue, a human does, so its healthy depth is not "low",
+it is empty.
+
+Its honest limitation: SQS publishes `ApproximateNumberOfMessagesVisible` on a five-minute cadence, so
+detection lags the failure by five to ten minutes. Adequate for covers; not adequate for anything a
+customer is waiting on.
+
+## The cost optimisation
+
+Versioning makes a replaced cover recoverable and means the bucket **never shrinks** — every overwrite
+keeps the previous bytes forever, invisibly, and you pay for all of them.
+
+| rule | what it buys |
+|---|---|
+| `NoncurrentVersionExpiration` 30 days | The one that actually saves money. A cover replaced today is recoverable for a month, then the old bytes go. Without it, a cover updated monthly costs twelve covers a year and shows one. |
+| `AbortIncompleteMultipartUpload` 7 days | The rule nobody sets and everybody eventually needs. Failed multipart parts are **billed** and **invisible** to `s3 ls` — which is why "why is this bucket 400 GB when it holds 2 GB" is such a common question. |
+| Transition to `STANDARD_IA` at 90 days | ~45% cheaper for rarely-read objects. The catch is honest: IA charges for retrieval and has a 128 KB minimum billable size, so a bucket of 20 KB thumbnails read constantly costs **more** in IA than in Standard. |
+
+Not applied deliberately: expiring **current** versions. A cover with no book is a bug; a book with no
+cover after 400 days would be a feature nobody asked for.
+
+## What got worse
+
+- **The platform now has state AWS owns and this repository cannot recreate from code.** A dropped table
+  loses browsing history with no migration to replay — Flyway's guarantee for PostgreSQL has no
+  equivalent here, and the provisioning scripts describe *structure*, never contents.
+- **Two more places for a failure to hide.** A Lambda that stops being triggered and a bounded queue
+  that discards are both invisible from the API. The DLQ alarm covers one of them; nothing covers a
+  bucket notification that somebody deletes.
+- **The service now fails in ways its own tests cannot see.** Every AWS interaction is asserted against
+  a mock, because a test that needs an AWS account is a test that does not run in CI. What that leaves
+  unchecked is the part that broke most often here: whether the table actually exists with those keys,
+  and whether the credentials in the environment can reach it.
+- **Cost is now a property of correctness.** A hot partition, a missing TTL or a forgotten lifecycle
+  rule does not fail — it bills. Nothing in this project alarms on spend.
+
+## Next — Step 10
+
+Eight services started by hand, in an order that matters, with a Kafka broker and four databases behind
+them. Containers and Kubernetes.
