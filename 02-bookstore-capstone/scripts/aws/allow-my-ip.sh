@@ -27,7 +27,10 @@ INSTANCE="${1:-}"
 [ -z "${INSTANCE}" ] && { echo "usage: $0 <instance-id> [--monitor]"; exit 1; }
 REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
 
-PORTS=(22 30080)
+# 22 to get in, 30080 for the API, 30081 for the frontend. 30081 was missing from the first version of
+# this script because the frontend did not exist yet — which is the ordinary way a helper script goes
+# quietly out of date: it keeps working, and it stops covering the thing added after it.
+PORTS=(22 30080 30081)
 [ "${2:-}" = "--monitor" ] && PORTS+=(30090 30300)
 
 # checkip is AWS's own, so this needs no third-party service and returns the address AWS will see.
