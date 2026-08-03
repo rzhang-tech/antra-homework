@@ -24,8 +24,13 @@ on:
 # One run per branch. A push that supersedes another cancels it rather than queueing behind it —
 # on a repository with one contributor this is a small saving, and on a busy one it is the difference
 # between a five-minute pipeline and a fifty-minute queue.
+# `github.workflow` is in the key, and it has to be. Without it, this workflow's group is the same
+# whether it runs on its own or as the reusable job cd.yml calls — so one push starts both, they land
+# in the same group, and `cancel-in-progress` has one kill the other. Observed on the first push that
+# had both: the standalone CI run was cancelled after 2 seconds by CD's copy of it, which reads exactly
+# like a flaky pipeline and is not.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
