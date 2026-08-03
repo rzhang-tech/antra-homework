@@ -18,8 +18,25 @@ kind create cluster --config k8s/kind-cluster.yaml
 ./k8s/deploy.sh --load
 ```
 
-Then the platform is at **http://localhost:30080** — `/api/books`, `/api/auth/login`, `/api/orders`,
-`/api/payments`. Nothing else is reachable from outside, by construction rather than by rule.
+Then:
+
+| | |
+|---|---|
+| the platform | **http://localhost:30080** — `/api/books`, `/api/auth/login`, `/api/orders`, `/api/payments` |
+| Prometheus | **http://localhost:30090** — try `sum by (application) (rate(http_server_requests_seconds_count[5m]))` |
+| Grafana | **http://localhost:30300** — anonymous, Prometheus datasource already provisioned |
+
+No service's own port is reachable from outside, by construction rather than by rule.
+
+The HPA needs metrics-server, which **k3s bundles and kind does not**. On kind, once:
+
+```bash
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+```
+
+```bash
+kubectl patch deployment metrics-server -n kube-system --type=json -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+```
 
 ```bash
 kubectl get pods -n bookstore
@@ -64,7 +81,19 @@ Do not run compose and k3s at the same time on 8 GiB. `docker compose down` firs
 | `40-user-service.yaml` | **the canonical service manifest** — probes, resources and ordering are explained here |
 | `41`–`45` | book, order, payment, notification, analytics |
 | `50-api-gateway.yaml` | the only NodePort, and the only Service that does not name its management port |
+| `60-autoscaling.yaml` | HPAs on the four services that can scale, and why the other four cannot |
+| `70-monitoring.yaml` | Prometheus, Grafana, and the seven alert rules — **the alert rules are the part worth reading** |
 | `deploy.sh` | builds the ConfigMap and Secret, stamps the config checksum, applies, waits |
+
+`deploy.sh` rolls the config server **first and waits for it**, then everything else. Applying all
+eight at once lets a client fetch from the outgoing config-server pod and come up on the previous
+configuration — permanently, while reporting Ready with the correct checksum. Found in 11c.
+
+Deploying images from the registry rather than from the node:
+
+```bash
+IMAGE_REPO=ghcr.io/rzhang-tech IMAGE_TAG=$(git rev-parse HEAD) ./k8s/deploy.sh
+```
 
 ## Three things worth reading `40-user-service.yaml` for
 

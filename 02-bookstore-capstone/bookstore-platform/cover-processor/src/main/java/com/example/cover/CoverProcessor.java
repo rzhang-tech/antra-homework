@@ -98,7 +98,7 @@ public class CoverProcessor implements RequestHandler<S3Event, String> {
             String key = URLDecoder.decode(record.getS3().getObject().getKey(), StandardCharsets.UTF_8);
             String versionId = record.getS3().getObject().getVersionId();
 
-            String bookId = bookIdFrom(key);
+            String bookId = CoverKey.bookIdFrom(key);
             if (bookId == null) {
                 // Something under covers/ that is not covers/{number}. Not an error worth retrying:
                 // throwing here would fail the whole batch and eventually fill the dead letter queue
@@ -121,15 +121,6 @@ public class CoverProcessor implements RequestHandler<S3Event, String> {
         }
 
         return "processed=" + processed + " skipped=" + skipped;
-    }
-
-    /** {@code covers/42} to {@code 42}. The reverse of book-service's CoverStorageService.keyFor. */
-    static String bookIdFrom(String key) {
-        if (key == null || !key.startsWith("covers/")) {
-            return null;
-        }
-        String id = key.substring("covers/".length());
-        return id.matches("\\d+") ? id : null;
     }
 
     private CoverFacts read(String bucket, String key, String versionId) {

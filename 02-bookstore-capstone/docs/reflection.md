@@ -338,6 +338,42 @@ Updated in the same commit as the step, which is the point of the last entry bel
 
 ---
 
+## Step 11 — CI/CD and monitoring
+
+- **The deploy stage is gated but never runs.** Reaching the k3s box from a GitHub runner means either
+  exposing its API server to the internet or running a self-hosted runner inside it, and the first is
+  a bad trade that would sit in this repository as an example. `environment: production` makes the gate
+  real; what is missing is a cluster it is allowed to talk to. A self-hosted runner on the box, pulling
+  rather than being pushed to, is the shape that would close it honestly.
+- **Metrics die with the pod.** One Prometheus replica on an `emptyDir` with six hours of retention, no
+  Alertmanager, no long-term storage. The seven alert **rules** are the part worth having and the part
+  that transfers to any backend unchanged; the deployment underneath them is a demonstration.
+- **`PodRestartLoop` cannot currently fire**, because it needs kube-state-metrics and that is not
+  installed. The one alert that would have caught the 10d incident — new pods failing while the old
+  ones served perfectly and every other metric stayed green — is the one that is not wired up.
+- **Alarm routing is designed, not deployed.** `severity: page` and `severity: ticket` are on every
+  rule, which is what Alertmanager routes on; what the project does not have is somebody to page.
+- **The gateway's errors cannot be attributed to a route.** Spring Cloud Gateway reports `uri` as
+  `UNKNOWN`, so "which route is failing" needs `gateway_requests_seconds` rather than the HTTP server
+  metrics the alert rules use.
+- **A `grep` I trusted found two of six files.** Six config files override the actuator exposure list,
+  and `grep -A3 exposure` found two because comments sat between the key and its value. This project
+  has a written rule for exactly this — grep the leaf key, not the dotted path — and I broke it by
+  grepping the *parent* key with too little context. The rule needs a second half: **when a grep
+  informs a change, count the hits against what you expect to find.**
+- **`deploy.sh` had a race it took a symptom to find.** Rolling the config server and its seven clients
+  at once lets a client fetch from the *outgoing* config-server pod and come up on the previous
+  configuration — permanently, while reporting Ready with the correct checksum annotation. Fixed by
+  rolling the config server first and waiting. It is 10b's lesson one level up: the thing that serves
+  configuration is itself a process that must be current before anything reads it.
+- **Two orphaned processes and a lesson about waiting.** An interrupted `mvnw test` survived its shell
+  and kept spawning Testcontainers; separately, a `until` loop polled for eight healthy scrape targets
+  for ten minutes when only three could ever become healthy without a code change. **A wait loop is for
+  conditions time resolves, not for conditions a fix resolves** — and the fastest way to tell them
+  apart is to ask what would change if you waited an hour.
+
+---
+
 ## Things I would do differently if starting over
 
 - **Model `Author` from the first schema** (Step 1), rather than splitting it across two steps.

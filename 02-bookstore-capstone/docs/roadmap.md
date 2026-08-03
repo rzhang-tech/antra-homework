@@ -17,7 +17,7 @@ Legend: ☐ not started · ◐ in progress · ☑ done
 | 8 | Single front door | Spring Cloud Gateway | ☑ |
 | 9 | Serverless file processing + browsing history | S3, Lambda, DynamoDB, SES/SNS | ☑ |
 | 10 | Containerization & orchestration | Docker, Docker Compose, Kubernetes/EKS | ☑ |
-| 11 | CI/CD & monitoring | GitHub Actions, Actuator, CloudWatch | ☐ |
+| 11 | CI/CD & monitoring | GitHub Actions, GHCR, Prometheus, Grafana | ☑ |
 
 ## Why this order
 

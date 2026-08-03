@@ -54,7 +54,21 @@ public class SecurityConfig {
                          * than on a token is the normal arrangement for health and metrics, and Step 11
                          * revisits it when the endpoints start carrying more.
                          */
-                        .requestMatchers("/actuator/health", "/actuator/health/**",
+                        // /actuator/prometheus is permitted alongside health, and the reasoning is
+                        // the same one Step 10c used for the gateway's management port: the boundary
+                        // is the Service definition, not this filter chain. No service's own port is
+                        // published outside the cluster, so this endpoint is reachable from other
+                        // pods and from nowhere else.
+                        //
+                        // The alternative was a token in Prometheus's scrape config, which means a
+                        // long-lived credential in a ConfigMap - strictly worse than relying on a
+                        // network boundary that already exists.
+                        //
+                        // What it is honest to admit: metrics disclose URI templates, request counts
+                        // and error rates, and there is no NetworkPolicy in this namespace, so any
+                        // pod can read them. That is the same gap 10c listed under "what got worse",
+                        // not a new one, and a NetworkPolicy closes both.
+                        .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/prometheus",
                                 "/actuator/circuitbreakers", "/actuator/circuitbreakerevents").permitAll()
 
                         .requestMatchers("/actuator/**").hasRole("ADMIN")

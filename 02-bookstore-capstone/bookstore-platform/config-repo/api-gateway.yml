@@ -146,7 +146,7 @@ management:
       exposure:
         # `gateway` lists the live routes, which is the first thing to look at when a request lands
         # somewhere unexpected.
-        include: health,info,refresh,env,loggers,metrics,gateway
+        include: health,info,refresh,env,loggers,metrics,gateway,prometheus
   endpoint:
     health:
       show-details: always

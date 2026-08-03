@@ -19,14 +19,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  * the only symptom is a cover that never gets metadata or an email.
  */
 @DisplayName("Deriving the book id from the object key")
-class CoverProcessorTest {
+class CoverKeyTest {
 
     @Test
     @DisplayName("reverses the key book-service writes")
     void parsesTheDeterministicKey() {
         // Must match CoverStorageService.keyFor(42L) exactly.
-        assertThat(CoverProcessor.bookIdFrom("covers/42")).isEqualTo("42");
-        assertThat(CoverProcessor.bookIdFrom("covers/1")).isEqualTo("1");
+        assertThat(CoverKey.bookIdFrom("covers/42")).isEqualTo("42");
+        assertThat(CoverKey.bookIdFrom("covers/1")).isEqualTo("1");
     }
 
     @Test
@@ -36,11 +36,11 @@ class CoverProcessorTest {
         // invocation, Lambda would retry it, and the retry would fail identically - so one stray
         // object under covers/ would fill the dead letter queue with something that can never
         // succeed, while the covers behind it waited.
-        assertThat(CoverProcessor.bookIdFrom("covers/not-a-number")).isNull();
-        assertThat(CoverProcessor.bookIdFrom("covers/42.png")).isNull();
-        assertThat(CoverProcessor.bookIdFrom("thumbnails/42")).isNull();
-        assertThat(CoverProcessor.bookIdFrom("covers/")).isNull();
-        assertThat(CoverProcessor.bookIdFrom(null)).isNull();
+        assertThat(CoverKey.bookIdFrom("covers/not-a-number")).isNull();
+        assertThat(CoverKey.bookIdFrom("covers/42.png")).isNull();
+        assertThat(CoverKey.bookIdFrom("thumbnails/42")).isNull();
+        assertThat(CoverKey.bookIdFrom("covers/")).isNull();
+        assertThat(CoverKey.bookIdFrom(null)).isNull();
     }
 
     @Test
@@ -49,6 +49,6 @@ class CoverProcessorTest {
         // Step 9b's decision, asserted from the other side: had book-service used covers/{id}.png,
         // this function would have needed to strip an extension it cannot predict - and uploading a
         // JPEG over a PNG would have left two objects, two events and two rows for one book.
-        assertThat(CoverProcessor.bookIdFrom("covers/42.jpg")).isNull();
+        assertThat(CoverKey.bookIdFrom("covers/42.jpg")).isNull();
     }
 }

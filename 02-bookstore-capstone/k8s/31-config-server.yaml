@@ -32,6 +32,8 @@ spec:
         # nothing happens — the running pod keeps the configuration it read at startup, which is
         # precisely the bug 10b hit twice in one afternoon. deploy.sh recomputes it.
         bookstore.config-repo/checksum: "replaced-by-deploy.sh"
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8888"
     spec:
       containers:
         - name: config-server

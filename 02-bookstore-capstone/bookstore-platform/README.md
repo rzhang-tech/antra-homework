@@ -2300,3 +2300,238 @@ Two things follow, and both were fixed rather than noted:
   design note, not in this repository.
 - **The config repo can still be broken in a way nothing catches until a pod restarts.** Fixed for the
   one file that broke; unvalidated in general.
+
+---
+
+# Step 11a — a test gate, and the config file nothing was checking
+
+[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) runs the whole reactor on every push and
+pull request. Since 10a every Dockerfile has run `package -DskipTests` (D30), so **"it built" meant
+only "it compiled"** — 11b's image job `needs:` this one, and that is where the sentence stops being
+true.
+
+The tests are not adapted to run in CI. A GitHub-hosted runner has a Docker daemon, so Testcontainers
+and `@EmbeddedKafka` work unchanged and the pipeline runs the same suite a laptop does. **A suite
+needing a CI-only variant would be proving something different from the one developers run.**
+
+## The config file nothing was checking
+
+`ConfigRepoParsesTest` closes the gap 10d found the hard way, and it is a twenty-line test for a
+failure that took down every pod that restarted.
+
+`ConfigServerContractTest` could not have caught it, and the reason is worth stating: that test asserts
+what the files **say** — which service gets which datasource, which route points where — and to do so
+it asks a running config server, which by then has already failed to load the file. The new test
+asserts only that they can be **read at all**, which is both cheaper and more fundamental.
+
+Verified by reintroducing the bug rather than by trusting it:
+
+```
+clean repo                          20 files, all pass
+a real duplicate `httpclient` key   Tests run: 20, Failures: 1
+                                    [config-repo/api-gateway.yml must be loadable YAML]
+```
+
+A `@TestFactory` rather than a loop, so the broken file is **named** instead of being "the first one
+that threw" — Surefire renders a dynamic test as `everyConfigFileParses()[4]`, and SnakeYAML's own
+error says `in 'reader', line 14` without a filename, so the assertion carries the name itself.
+
+It also asserts it found at least fifteen files. A `Files.list` pointed at a moved directory would
+produce zero dynamic tests and report **green**, which is this test's own failure mode one level up.
+
+## A CI defect fixed before it could be one
+
+Every `.sh` in the repository, and `mvnw` itself, was mode **100644** in the git index. Windows does not
+track the execute bit, so `./mvnw` on a Linux runner fails with `Permission denied` — a red build with
+nothing wrong with the code. `git update-index --chmod=+x` on all nine.
+
+---
+
+# Step 11b — a version you can roll back to
+
+[`.github/workflows/cd.yml`](../../.github/workflows/cd.yml) builds the eight images and publishes them
+to GHCR, tagged by commit SHA.
+
+## Two tags, and only one of them is a version
+
+```
+ghcr.io/<owner>/bookstore/<service>:<git-sha>     immutable; names one build forever
+ghcr.io/<owner>/bookstore/<service>:latest        a convenience alias, and a different thing tomorrow
+```
+
+`:latest` is the one tag that **cannot be rolled back to**, which is exactly what Step 10's manifests
+used and said so. The SHA tag is what makes "which build is in production" and `kubectl rollout undo`
+answerable at all.
+
+A matrix over the eight services rather than one job looping: eight images build in parallel, and the
+job name alone says *which* image failed. `fail-fast: false`, so the seven that work still publish.
+
+**GHCR rather than ECR**, and the reason is the same argument as `docs/eks-and-irsa.md`: Actions
+authenticates to GHCR with the `GITHUB_TOKEN` it already has, so there is **no secret to create, store
+or rotate**. ECR needs either a long-lived IAM user key in a repository secret or an OIDC role. Both
+cost pennies; only one of them adds a credential. Swapping is the registry prefix plus a
+`configure-aws-credentials` step.
+
+`deploy.sh` grew a registry mode to match — `IMAGE_REPO` and `IMAGE_TAG` rewrite the image line and
+flip `imagePullPolicy: Never` to `IfNotPresent`. A `sed`, not a templating language: `kubectl apply -f
+k8s/` still works with no preprocessing, and that property is worth more here than what Helm would add.
+
+## The rollback path, demonstrated rather than promised
+
+A deliberately broken deploy — an image tag that does not exist:
+
+```
+kubectl set image deployment/user-service user-service=bookstore/user-service:v99-broken
+
+  rollout status              error: timed out waiting for the condition   (exit 1)
+  new pod                     0/1   ErrImageNeverPull
+  old pod                     1/1   Running
+  POST /api/auth/register     201        <- during the failed deploy
+```
+
+**The platform never stopped serving.** That is not luck: a Deployment removes the old pod only once
+the new one passes its readinessProbe, so a rollout that cannot start is a rollout that changes
+nothing. 10c's probe work is what buys this, and it is why a readinessProbe that lies is worse than
+none.
+
+Then the undo:
+
+```
+kubectl rollout undo deployment/user-service
+
+  deployment "user-service" successfully rolled out
+  image                       bookstore/user-service:latest
+  POST /api/auth/register     201
+```
+
+The previous ReplicaSet still existed and still named the previous image, which is the whole point of
+an immutable tag: **rolling back is finding a tag, not rebuilding a commit.** `cd.yml` does exactly
+this automatically — `rollout status` per deployment, and `rollout undo` on any that fail to converge.
+
+## The deploy stage is gated, and deliberately not wired to a cluster
+
+The assignment allows an automated deploy **or** a deploy stage designed with a manual approval gate.
+This is the second, and the reason is not effort: reaching the k3s box means either exposing its API
+server to GitHub's runners or running a self-hosted runner inside it. **Opening a Kubernetes API server
+to the internet to make a capstone demo tidier is a bad trade**, and it would sit in this repository as
+an example for somebody to copy.
+
+`environment: production` is what makes the gate real rather than a comment — with a required reviewer
+on that environment, GitHub will not run the job until a human approves, and the kubeconfig secret is
+scoped to the environment so nothing outside an approved deployment can read it.
+
+---
+
+# Step 11c — what to alarm on, which is a harder question than how to collect
+
+Actuator has collected these metrics since Step 6c and Micrometer has been the facade over them the
+whole time. 11c adds a wire format and something to read it, and **no application code changed** —
+which is the property worth noticing: swapping Prometheus for CloudWatch or Datadog is one dependency,
+because nothing in this platform references a registry type.
+
+```
+Prometheus   http://localhost:30090        Grafana   http://localhost:30300
+```
+
+Prometheus discovers targets by asking the Kubernetes API rather than from a list of eight addresses.
+The autoscaler creates and destroys pods; a static list would monitor the pods that existed when
+somebody wrote it and silently stop covering whatever scaled up — **which is the moment monitoring
+matters most.**
+
+Measured, with all eight scraping:
+
+```
+sum by (application) (rate(http_server_requests_seconds_count[5m]))
+
+  book-service    0.541      api-gateway     0.361      user-service    0.218
+  order-service   0.214      analytics       0.218      payment         0.218
+
+histogram_quantile(0.99, sum by (application,le) (rate(http_server_requests_seconds_bucket[5m])))
+
+  api-gateway  0.68s     book-service  0.21s     order-service  0.043s     user-service  0.019s
+
+sum by (application,status,uri) (http_server_requests_seconds_count{status!="200"})
+
+  book-service   404  /api/books/{id}   11
+  order-service  409  /api/orders        8        <- out of stock, correctly refused
+  api-gateway    404  NOT_FOUND         11
+```
+
+## p99 is why `percentiles-histogram` and not `percentiles`
+
+The distinction is easy to get wrong and impossible to fix afterwards. `percentiles:` has each process
+compute its own 99th percentile and publish the answer — and **those numbers cannot be aggregated**:
+the p99 of three replicas is not the mean, the max, or any function of their three p99s. With an
+autoscaler adding and removing replicas, a per-instance percentile is a number about one pod that
+nobody wants.
+
+`percentiles-histogram: true` publishes cumulative **bucket counts** instead. Counts add across
+replicas, so `histogram_quantile` over summed buckets is a true platform-wide p99. The cost is series
+count, which is why it is on for HTTP requests and nothing else, with explicit SLO boundaries chosen
+from what this platform does — the top bucket sits above the 3 s Feign read timeout, or every timeout
+lands in `+Inf` and the quantile becomes a guess.
+
+## Seven alerts, and the rule that chose them
+
+**Alert on symptoms the customer feels, not on causes.** High CPU is a cause and is usually fine;
+requests failing is a symptom and never is. Every rule below would wake somebody, which is the test for
+whether it should exist — there is a much longer list of things worth *watching* than alerting on.
+
+| | why this one |
+|---|---|
+| `HighErrorRate` | 5xx share > 5%. A **ratio**, so it means the same at 10 req/s and 10,000. 5xx only: 4xx is customers mistyping, and alerting on it pages every time a token expires |
+| `HighLatencyP99` | > 3s. A mean hides the tail completely — 99 fast requests and one 10-second request average out fine, and the customer who waited 10 seconds is the one who leaves |
+| `KafkaConsumerLag` | The one metric that catches a failure with **no error anywhere**. A stopped consumer is UP, has a zero error rate, and orders quietly go unconfirmed — Step 7 described exactly this and the answer was "read the logs" |
+| `ConnectionPoolExhausted` | Hikari *pending* is threads blocked waiting for a connection: the shape of every "slow and nothing is erroring" incident, and the leading indicator of the N+1 queries Step 2 hunted |
+| `CircuitBreakerOpen` | Step 5c said "a breaker whose state nobody can see converts an outage into a mystery". This is that sentence kept |
+| `DeadLetterMessages` | Threshold **zero**. Nothing consumes those topics, a human does, so healthy depth is not "low", it is empty — 7d's argument as a rule |
+| `PodRestartLoop` | Everything above measures a process that is running. **This is the alert that would have fired during the 10d incident**, where new pods could not start while the old ones served perfectly and every other metric stayed green |
+
+Deliberately **not** alerted on, because every unnecessary alert makes the necessary ones less likely
+to be read: CPU and memory utilisation (causes, and the HPA already responds to CPU); request rate (a
+drop to zero at 3am is normal and at noon is an outage — that needs seasonality, not a threshold); JVM
+heap (GC exists; alert on OOMKills, which `PodRestartLoop` catches).
+
+**Routing is designed, not deployed.** Alertmanager would take these and fan out to SNS or a Slack
+webhook, with `severity: page` and `severity: ticket` as the routing key — the labels are already on
+every rule. Adding Alertmanager is one Deployment and a receiver config; what it needs and this project
+does not have is somebody to page.
+
+## Three bugs this step produced, all the same shape
+
+**1. Five services 404ed on an endpoint their configuration plainly enabled.** Six files override
+`management.endpoints.web.exposure.include`, and a `grep -A3 exposure` found only two of them because
+comments sat between the key and its value. The config-move rule this project has learned repeatedly —
+**grep the leaf key, not the dotted path** — and it was broken again by grepping the *parent* key with
+too little context.
+
+**2. Then they still 404ed after the fix**, and this one is a genuine race in `deploy.sh`. Applying all
+eight workloads at once rolls the config server and its seven clients **simultaneously**, so a client
+can start, fetch from the *outgoing* config-server pod, and come up holding the previous configuration
+— permanently, while reporting Ready and carrying the correct checksum annotation. The symptom was five
+services 404ing on an endpoint the config server was demonstrably serving correctly, and the fix for
+each was a restart that changed nothing else.
+
+`deploy.sh` now rolls the config server first and waits for it. **The thing that serves configuration
+is itself a process that must be current before anything reads it** — 10b's lesson one level up.
+
+**3. `/actuator/prometheus` returned 500 rather than 404 on order-service**, because its
+`GlobalExceptionHandler` treats `NoResourceFoundException` as unhandled. A missing path is a 404; a 500
+is the server claiming a bug it does not have and sending whoever reads the log to debug the wrong
+service — which is Step 5b's argument, arriving again in a service that had already made it.
+
+## What got worse
+
+- **Metrics die with the pod.** One Prometheus replica, `emptyDir`, six hours of retention, no
+  Alertmanager and no long-term storage. kube-prometheus-stack is the real answer and is a Helm chart
+  with ~40 CRDs, which would teach Helm rather than monitoring. The alert **rules** are the part worth
+  having and the part that transfers to any backend unchanged.
+- **`/actuator/prometheus` is `permitAll`.** The boundary is the Service definition rather than the
+  filter chain — no service's port is published outside the cluster — but metrics disclose URI
+  templates and error rates, and there is still no NetworkPolicy in this namespace. Same gap 10c
+  listed, not a new one.
+- **`PodRestartLoop` needs kube-state-metrics**, which is not installed, so the one alert that would
+  have caught the 10d incident is the one that cannot currently fire.
+- **The gateway's error rate cannot be attributed to a route.** Spring Cloud Gateway reports `uri` as
+  `UNKNOWN` or `NOT_FOUND` because it has no URI templates, so "which route is failing" needs its own
+  `gateway_requests_seconds` metrics rather than the HTTP server ones.

@@ -49,6 +49,23 @@
         </dependency>
 
         <!--
+          Micrometer's Prometheus backend (Step 11c). Actuator already collects the metrics - HTTP
+          timings, JVM memory, Hikari pool state, Kafka consumer lag - and Micrometer is the facade
+          over them; this dependency only decides the WIRE FORMAT they are published in, and adds
+          /actuator/prometheus.
+
+          Which is the property worth knowing: swapping Prometheus for CloudWatch, Datadog or OTLP is
+          this one dependency and no application code, because nothing in this project ever references
+          a registry type. A `MeterRegistry` is injected where a custom metric is recorded and that is
+          the whole coupling.
+        -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!--
           The client half of Step 6. It contributes a `configserver:` handler for
           `spring.config.import`, so configuration is fetched during the config-data phase - before any
           bean is created and before @ConfigurationProperties binds. By the time the application context

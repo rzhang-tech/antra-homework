@@ -18,6 +18,8 @@ on:
   pull_request:
   # So the pipeline can be exercised without pushing a commit to prove it works.
   workflow_dispatch:
+  # Callable from cd.yml, so "the tests pass" has one definition and cannot drift between two files.
+  workflow_call:
 
 # One run per branch. A push that supersedes another cancels it rather than queueing behind it —
 # on a repository with one contributor this is a small saving, and on a busy one it is the difference

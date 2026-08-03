@@ -31,4 +31,4 @@ management:
         # The cost is that changing this service's configuration means restarting it. For a stateless
         # consumer whose offsets live on the broker, a restart is close to free - it resumes exactly
         # where it left off - so this is the cheap side of the trade.
-        include: health
+        include: health,prometheus

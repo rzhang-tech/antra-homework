@@ -863,6 +863,94 @@ platform can justify, and each would need its own operational story.
 
 ---
 
+## D36 — The test gate lives in the pipeline, not in the Dockerfile
+
+**Decision.** Every Dockerfile still runs `package -DskipTests` (D30). CI runs the full suite once per
+commit, and the image job `needs:` it, so a failing test means no image is produced.
+
+**Why not run tests in the image build.** The suite uses Testcontainers, which needs a Docker daemon
+inside the build — docker-in-docker, for a guarantee available more cheaply elsewhere. And it would
+run the same suite **eight times per commit**, once per image, for one commit's worth of information.
+
+**Why the gate is real anyway.** The dependency is expressed in the pipeline rather than in a comment:
+`needs: test` means the image job does not start. D30 said "Step 11 closes it"; this is that, and the
+thing being closed is that "it built" meant only "it compiled".
+
+**What it still does not cover.** Somebody running `docker build` by hand, or `scripts/build-images.sh`
+locally, gets an image from untested code exactly as before. The gate protects what the pipeline
+publishes, not what a laptop can produce — and the registry is the only place a deploy pulls from,
+which is what makes that acceptable rather than a hole.
+
+---
+
+## D37 — Images are tagged by commit SHA, and `latest` is an alias rather than a version
+
+**Decision.** Every image is published twice: `:<git-sha>` and `:latest`. Deployments reference the SHA.
+
+**Why.** A SHA tag is immutable — it names one build of one commit forever. That is what makes three
+otherwise impossible questions answerable: which build is running, what changed between it and the
+last one, and what to roll back *to*. `:latest` means something different tomorrow, which is precisely
+why Step 10's manifests using it could not be rolled back.
+
+**Demonstrated rather than asserted.** A deploy of a tag that does not exist left the new pod in
+`ErrImageNeverPull`, the old pod `Running`, and the platform serving `201` throughout — because a
+Deployment removes the old pod only once the new one passes its readinessProbe. `kubectl rollout undo`
+then restored the previous ReplicaSet, which still named the previous image.
+
+**Why this makes the probes load-bearing.** Zero-downtime rollout and automatic rollback both rest
+entirely on readiness being honest. A readinessProbe that reports ready too early converts this into a
+deploy that drops requests and a rollback that never triggers — which is the other half of D32's
+argument, arriving from the deployment side.
+
+---
+
+## D38 — GHCR rather than ECR, because the cheaper option is the one with no secret
+
+**Decision.** Images go to GitHub Container Registry.
+
+**Why.** GitHub Actions authenticates to GHCR with the `GITHUB_TOKEN` it is handed automatically —
+scoped to the repository, scoped to the run, and expiring with it. There is no secret to create, store,
+rotate, or leak. ECR requires either a long-lived IAM user access key in a repository secret or an OIDC
+role and trust policy.
+
+**Why that argument and not cost.** Both are pennies at this size. The deciding factor is the same one
+`docs/eks-and-irsa.md` reaches about IRSA: **the improvement worth having is the one that removes a
+long-lived credential rather than storing it better.** Choosing ECR here would have added the exact
+class of secret that document argues to eliminate.
+
+**What it costs.** The images live next to the code rather than next to the deployment, so an EKS
+cluster pulling from GHCR needs an imagePullSecret where ECR would have needed none. Swapping is the
+registry prefix and a `configure-aws-credentials` step — it was kept that cheap on purpose.
+
+---
+
+## D39 — Alert on symptoms the customer feels, not on causes
+
+**Decision.** Seven alert rules: error rate, p99 latency, Kafka consumer lag, connection-pool
+exhaustion, circuit breaker open, dead-letter depth, pod restart loop. **No alert on CPU, memory,
+heap, or request rate.**
+
+**Why the exclusions matter more than the inclusions.** Every unnecessary alert makes the necessary
+ones less likely to be read, and the excluded four are the ones most commonly alerted on:
+
+- **CPU / memory** are causes. A service at 90% CPU answering every request in 20 ms has no problem,
+  and the HPA already responds to CPU. Worth a dashboard panel; not worth waking somebody.
+- **Request rate** is a business metric. A drop to zero at 3am is normal and at noon is an outage —
+  encoding that needs seasonality, not a threshold.
+- **JVM heap** — garbage collection exists. Alert on OOMKills, which the restart-loop rule catches.
+
+**The rules that earn their place are the ones nothing else would reveal.** Kafka consumer lag is the
+clearest: a consumer that has stopped is UP, has a zero error rate, and lets orders go unconfirmed
+silently — Step 7 described exactly that failure and its answer was "read the logs". Dead-letter depth
+has threshold **zero**, because nothing consumes those topics and a human does, so healthy is empty
+rather than low.
+
+**The general shape.** Health for a human aggregates everything. Health for something that acts —
+a probe, an autoscaler, a pager — must include only what that actor can do something about. This is
+D32's rule applied to alerting instead of probes.
+
+---
+
 ## D5 — Cross-service references are plain IDs, not foreign keys
 
 **Decision.** `order_item.book_id` and `orders.user_id` are plain `BIGINT` columns with no FK constraint.

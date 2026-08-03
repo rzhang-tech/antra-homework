@@ -56,6 +56,8 @@ spec:
         # repo once at startup and never again. Stamping it only on config-server was a real gap —
         # a changed value reached the server and none of its seven clients. deploy.sh replaces it.
         bookstore.config-repo/checksum: "replaced-by-deploy.sh"
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
     spec:
       containers:
         - name: api-gateway

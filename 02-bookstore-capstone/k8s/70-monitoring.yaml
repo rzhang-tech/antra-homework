@@ -1,0 +1,291 @@
+# Prometheus and Grafana — Step 11c.
+#
+# Actuator has collected these metrics since Step 6c; Micrometer has been the facade over them the
+# whole time. All 11c adds is a wire format (`micrometer-registry-prometheus`) and something to read
+# it. **No application code changed**, and that is the property worth noticing: swapping Prometheus for
+# CloudWatch or Datadog is one dependency, because nothing in the platform references a registry type.
+#
+# WHAT THIS IS NOT. A production monitoring stack: one Prometheus replica, no persistent volume, no
+# Alertmanager, no long-term storage. Metrics live in memory and die with the pod. That is a deliberate
+# scope decision — kube-prometheus-stack is the real answer and is a Helm chart with ~40 CRDs, which
+# would teach Helm rather than monitoring. The alert RULES below are the part worth having, and they
+# are the part that transfers unchanged to any backend.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: prometheus, namespace: bookstore}
+---
+# Prometheus discovers what to scrape by asking the Kubernetes API, so it needs permission to list
+# pods. Read-only, and namespaced to `bookstore` via the RoleBinding — a ClusterRole is required for
+# the API groups but nothing grants it cluster-wide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: bookstore-prometheus}
+rules:
+  - apiGroups: [""]
+    resources: [pods, services, endpoints]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: bookstore-prometheus, namespace: bookstore}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: bookstore-prometheus}
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: bookstore
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: prometheus-config, namespace: bookstore}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+
+    scrape_configs:
+      # Pod discovery rather than a hardcoded list of eight addresses. The autoscaler creates and
+      # destroys pods; a static list would monitor the pods that existed when somebody wrote it, and
+      # would silently stop covering whatever scaled up — which is the moment monitoring matters most.
+      - job_name: bookstore-services
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces: {names: [bookstore]}
+        relabel_configs:
+          # Only pods that say they want scraping, via the annotation set in each Deployment. Without
+          # this, Prometheus tries to scrape PostgreSQL and Kafka on an HTTP path they do not serve and
+          # fills the targets page with red that means nothing.
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          # Build the scrape address as podIP:annotatedPort. The default discovery address is the
+          # pod IP with the first declared container port, which for api-gateway would be 8080 — the
+          # public port, where /actuator/prometheus is a 404 because Step 8c moved actuator to 9090.
+          # The annotation lets each pod say where its metrics really are.
+          - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            separator: ":"
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: service
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+        metrics_path: /actuator/prometheus
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: prometheus-rules, namespace: bookstore}
+data:
+  bookstore.yml: |
+    # ===============================================================================================
+    # WHAT TO ALARM ON, AND WHY EACH ONE AND NOT THE OTHERS.
+    #
+    # The rule applied throughout: alert on SYMPTOMS THE CUSTOMER FEELS, not on causes. High CPU is a
+    # cause and is usually fine; requests failing is a symptom and never is. Every rule below would
+    # wake somebody, which is the test for whether it should exist at all — a dashboard is for
+    # everything else, and there is a much longer list of things worth *watching* than alerting on.
+    # ===============================================================================================
+    groups:
+      - name: bookstore
+        rules:
+          # 1. ERROR RATE. The first thing to alert on anywhere, because it is what a customer
+          #    experiences. 5xx only: 4xx is customers mistyping, and alerting on it means an alert
+          #    every time a token expires. Expressed as a RATIO rather than a count, so it means the
+          #    same thing at 10 requests per second and at 10,000.
+          - alert: HighErrorRate
+            expr: |
+              sum by (application) (rate(http_server_requests_seconds_count{status=~"5.."}[5m]))
+              / sum by (application) (rate(http_server_requests_seconds_count[5m])) > 0.05
+            for: 5m
+            labels: {severity: page}
+            annotations:
+              summary: "{{ $labels.application }} is failing {{ $value | humanizePercentage }} of requests"
+
+          # 2. LATENCY, as p99 rather than mean. A mean hides the tail completely: 99 fast requests and
+          #    one 10-second request average out fine, and the customer who waited 10 seconds is the
+          #    one who leaves. Computed with histogram_quantile over summed buckets, which is why
+          #    `percentiles-histogram` is enabled rather than `percentiles` — per-instance percentiles
+          #    cannot be aggregated across replicas at all.
+          - alert: HighLatencyP99
+            expr: |
+              histogram_quantile(0.99,
+                sum by (application, le) (rate(http_server_requests_seconds_bucket[5m]))) > 3
+            for: 10m
+            labels: {severity: page}
+            annotations:
+              summary: "{{ $labels.application }} p99 is {{ $value }}s"
+
+          # 3. KAFKA CONSUMER LAG. The one metric that catches a failure with NO error anywhere: a
+          #    consumer that has stopped consuming looks perfectly healthy from outside — its health
+          #    endpoint is UP, its error rate is zero, and orders quietly go unconfirmed. Step 7
+          #    described exactly this and the answer was "read the logs".
+          #
+          #    Lag GROWING matters more than lag being large, hence the `for:` — a burst of orders
+          #    produces lag that a healthy consumer clears in seconds.
+          - alert: KafkaConsumerLag
+            expr: sum by (application, client_id) (kafka_consumer_fetch_manager_records_lag) > 1000
+            for: 10m
+            labels: {severity: page}
+            annotations:
+              summary: "{{ $labels.application }} is {{ $value }} records behind"
+
+          # 4. CONNECTION POOL EXHAUSTION. Hikari's pending count is threads BLOCKED waiting for a
+          #    connection, which is the shape of every "the site is slow and nothing is erroring"
+          #    incident: requests are not failing, they are queueing, and the symptom arrives as
+          #    latency somewhere else entirely. It is also the leading indicator of the N+1 queries
+          #    Step 2 went looking for.
+          - alert: ConnectionPoolExhausted
+            expr: hikaricp_connections_pending > 5
+            for: 5m
+            labels: {severity: page}
+            annotations:
+              summary: "{{ $labels.application }} has {{ $value }} threads waiting for a DB connection"
+
+          # 5. CIRCUIT BREAKER OPEN. Step 5c made the breaker's state observable and then said "a
+          #    breaker whose state nobody can see converts an outage into a mystery". This is the
+          #    sentence being kept. An open breaker means order-service has given up on book-service —
+          #    correct behaviour, and never something to discover from a customer.
+          - alert: CircuitBreakerOpen
+            expr: resilience4j_circuitbreaker_state{state="open"} == 1
+            for: 2m
+            labels: {severity: page}
+            annotations:
+              summary: "{{ $labels.application }}: circuit breaker {{ $labels.name }} is OPEN"
+
+          # 6. THE PLATFORM'S OWN DEAD LETTER DEPTH, from the gauge Step 7d added. Threshold ZERO,
+          #    deliberately: nothing consumes those topics, a human does, so the healthy depth is not
+          #    "low", it is empty. 7d's argument in one rule — a dead letter topic removes the symptom
+          #    along with the failure, so the monitor is what makes it safe to have one.
+          - alert: DeadLetterMessages
+            expr: bookstore_dlq_depth > 0
+            for: 1m
+            labels: {severity: ticket}
+            annotations:
+              summary: "{{ $value }} message(s) in a dead letter topic, unhandled"
+
+          # 7. A POD RESTART LOOP, because everything above measures a process that is running. This
+          #    catches the one that is not — and it is the alert that would have fired during the 10d
+          #    incident, where a duplicate YAML key stopped new pods starting while the old ones went
+          #    on serving perfectly and every other metric stayed green.
+          - alert: PodRestartLoop
+            expr: increase(kube_pod_container_status_restarts_total{namespace="bookstore"}[15m]) > 3
+            for: 5m
+            labels: {severity: page}
+            annotations:
+              summary: "{{ $labels.pod }} has restarted repeatedly"
+
+    # WHAT IS DELIBERATELY NOT ALERTED ON, because every unnecessary alert makes the necessary ones
+    # less likely to be read:
+    #
+    #   CPU / memory utilisation   a cause, not a symptom. The HPA already responds to CPU, and a
+    #                              service at 90% CPU serving every request in 20 ms has no problem.
+    #                              Worth a dashboard panel; not worth a page.
+    #   request rate               a business metric. A drop to zero at 3am is normal; the same drop
+    #                              at noon is an outage, and encoding that needs seasonality, not a
+    #                              threshold. Alert on errors and latency instead.
+    #   JVM heap used              GC exists. Alert on OOMKills, which PodRestartLoop already catches.
+    #   disk                       the databases are on 1Gi PVCs here and would matter in production.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: prometheus, namespace: bookstore, labels: {app: prometheus}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: prometheus}}
+  template:
+    metadata: {labels: {app: prometheus}}
+    spec:
+      serviceAccountName: prometheus
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.1.0
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            # Metrics are in memory and on an emptyDir here, so a short retention is honest rather
+            # than restrictive: there is nowhere durable for them to go.
+            - --storage.tsdb.retention.time=6h
+            - --web.enable-lifecycle
+          ports: [{containerPort: 9090, name: http}]
+          volumeMounts:
+            - {name: config, mountPath: /etc/prometheus/prometheus.yml, subPath: prometheus.yml}
+            - {name: rules, mountPath: /etc/prometheus/rules}
+            - {name: data, mountPath: /prometheus}
+          readinessProbe:
+            httpGet: {path: /-/ready, port: http}
+            periodSeconds: 10
+          resources:
+            requests: {memory: 256Mi, cpu: 50m}
+            limits: {memory: 512Mi}
+      volumes:
+        - {name: config, configMap: {name: prometheus-config}}
+        - {name: rules, configMap: {name: prometheus-rules}}
+        - {name: data, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: prometheus, namespace: bookstore, labels: {app: prometheus}}
+spec:
+  type: NodePort
+  selector: {app: prometheus}
+  ports: [{port: 9090, targetPort: http, nodePort: 30090, name: http}]
+---
+# Grafana, with the Prometheus datasource provisioned from a file rather than clicked in. A dashboard
+# that only exists in somebody's browser is a dashboard that disappears when the pod does.
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: grafana-provisioning, namespace: bookstore}
+data:
+  datasource.yml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: grafana, namespace: bookstore, labels: {app: grafana}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: grafana}}
+  template:
+    metadata: {labels: {app: grafana}}
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.5.1
+          env:
+            # Anonymous read-only access. Appropriate because this Service is not reachable from
+            # outside the cluster except through the NodePort on a single-tenant box, and a password
+            # in a manifest would be security theatre of exactly the kind D32's Secret note warns
+            # about. A real deployment puts SSO in front of it.
+            - {name: GF_AUTH_ANONYMOUS_ENABLED, value: "true"}
+            - {name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: Viewer}
+            - {name: GF_AUTH_DISABLE_LOGIN_FORM, value: "true"}
+          ports: [{containerPort: 3000, name: http}]
+          volumeMounts:
+            - {name: provisioning, mountPath: /etc/grafana/provisioning/datasources}
+          readinessProbe:
+            httpGet: {path: /api/health, port: http}
+            periodSeconds: 10
+            failureThreshold: 12
+          resources:
+            requests: {memory: 128Mi, cpu: 25m}
+            limits: {memory: 256Mi}
+      volumes:
+        - {name: provisioning, configMap: {name: grafana-provisioning}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: grafana, namespace: bookstore, labels: {app: grafana}}
+spec:
+  type: NodePort
+  selector: {app: grafana}
+  ports: [{port: 3000, targetPort: http, nodePort: 30300, name: http}]

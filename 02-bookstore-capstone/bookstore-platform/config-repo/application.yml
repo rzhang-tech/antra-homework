@@ -158,7 +158,7 @@ management:
         # (`app.jwt.secret` matches), but /actuator/env still discloses the full shape of the
         # configuration, and /actuator/refresh is a POST that changes a running process. Step 8's
         # gateway routes no /actuator/** from outside; until then these are localhost-only in practice.
-        include: health,info,refresh,env,loggers,metrics
+        include: health,info,refresh,env,loggers,metrics,prometheus
   endpoint:
     health:
       show-details: always
@@ -180,6 +180,35 @@ management:
       # becomes Ready, with nothing in the log to say so.
       probes:
         enabled: true
+
+  metrics:
+    tags:
+      # Every metric this process publishes gets `application=<name>`. Prometheus adds its own labels
+      # for pod and namespace, but not this: without it, `http_server_requests_seconds_count` from
+      # eight services is one undifferentiated series and "which service is erroring" cannot be asked.
+      application: ${spring.application.name}
+
+    distribution:
+      percentiles-histogram:
+        # WHAT MAKES p99 POSSIBLE AT ALL, and the distinction is worth being precise about because the
+        # obvious-looking alternative is wrong.
+        #
+        # `percentiles:` would have each process compute its own 99th percentile and publish the answer.
+        # Those numbers CANNOT BE AGGREGATED: the p99 of three replicas is not the mean, the max, or any
+        # function of their three p99s. With an autoscaler adding and removing replicas, a
+        # per-instance percentile is a number about one pod that nobody wants.
+        #
+        # `percentiles-histogram: true` publishes cumulative BUCKET COUNTS instead. Counts add up across
+        # replicas, so Prometheus computes a true platform-wide p99 with `histogram_quantile` after
+        # summing them. The cost is series count - a bucketed timer is dozens of series rather than one -
+        # which is exactly why it is enabled for HTTP requests and nothing else.
+        http.server.requests: true
+      slo:
+        # Explicit bucket boundaries, chosen from what this platform actually does rather than left to
+        # Micrometer's defaults: a catalog read is tens of milliseconds (Step 9 measured 24 ms), and
+        # placing an order crosses two services with a 3 s Feign read timeout behind it, so the top
+        # bucket has to sit above that or every timeout lands in `+Inf` and the quantile is a guess.
+        http.server.requests: 50ms,100ms,250ms,500ms,1s,3s,5s
 
 resilience4j:
   # Aspect ordering is platform policy, so it is stated once. The per-instance thresholds are not -

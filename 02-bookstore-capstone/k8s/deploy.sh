@@ -27,6 +27,31 @@ SERVICES=(config-server api-gateway user-service book-service order-service
           payment-service notification-service analytics-service)
 
 # ---------------------------------------------------------------------------------------------------
+# WHICH IMAGES TO DEPLOY. Two modes, and the manifests hold neither of them as a literal decision:
+#
+#   (default)                     bookstore/<svc>:latest   +  imagePullPolicy: Never
+#                                 images loaded into the node by --load. No registry involved.
+#
+#   IMAGE_REPO=ghcr.io/owner      <repo>/bookstore/<svc>:$IMAGE_TAG  +  imagePullPolicy: IfNotPresent
+#   IMAGE_TAG=<git sha>           what Step 11's pipeline publishes, and the only form that can be
+#                                 rolled back to, because a SHA tag names one build forever.
+#
+# A sed rather than a templating language. The manifests stay readable as themselves — `kubectl apply
+# -f k8s/` works with no preprocessing at all, and that property is worth more here than the generality
+# Helm would add.
+# ---------------------------------------------------------------------------------------------------
+IMAGE_REPO="${IMAGE_REPO:-}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+if [[ -n "$IMAGE_REPO" ]]; then
+  IMAGE_REWRITE="s|image: bookstore/\([a-z-]*\):latest|image: $IMAGE_REPO/bookstore/\1:$IMAGE_TAG|; \
+                 s|imagePullPolicy: Never|imagePullPolicy: IfNotPresent|"
+  echo "==> images: $IMAGE_REPO/bookstore/<service>:$IMAGE_TAG"
+else
+  IMAGE_REWRITE="s|^|&|"     # a no-op, so the pipeline below has one shape rather than two
+  echo "==> images: bookstore/<service>:latest, loaded into the node (no registry)"
+fi
+
+# ---------------------------------------------------------------------------------------------------
 # 1. Images into the node.
 #
 # There is no registry behind `bookstore/...`. A kind node is a container with its own containerd, and
@@ -105,13 +130,26 @@ echo "==> config-repo checksum $CHECKSUM"
 # EVERY workload, not only config-server. Stamping it on the server alone was a real gap, found in 10d
 # by changing a gateway value: the config server rolled, and the gateway went on serving the old one.
 # The server is not the only process that reads this configuration once at startup and never again.
-for f in 31-config-server 40-user-service 41-book-service 42-order-service \
+#
+# THE CONFIG SERVER GOES FIRST, AND THE SCRIPT WAITS FOR IT. Found in 11c, and it is a race rather than
+# an ordering preference. Applying all eight at once rolls the config server and its seven clients
+# simultaneously — so a client can start, fetch from the *outgoing* config-server pod, and come up
+# holding the previous configuration, permanently, while every pod reports Ready and carries the new
+# checksum annotation. The symptom was five services 404ing on an endpoint their configuration plainly
+# enabled, and the fix for each was a restart that changed nothing else.
+#
+# It is the same shape as the 10b bug one level up: the thing that serves configuration is itself a
+# process that must be current before anything reads it.
+sed "s|replaced-by-deploy.sh|$CHECKSUM|" "$K8S/31-config-server.yaml" | sed "$IMAGE_REWRITE" | kubectl apply -f -
+kubectl rollout status deployment/config-server -n "$NS" --timeout=300s
+
+for f in 40-user-service 41-book-service 42-order-service \
          43-payment-service 44-notification-service 45-analytics-service 50-api-gateway; do
-  sed "s|replaced-by-deploy.sh|$CHECKSUM|" "$K8S/$f.yaml"
+  sed "s|replaced-by-deploy.sh|$CHECKSUM|" "$K8S/$f.yaml" | sed "$IMAGE_REWRITE"
   echo "---"
 done | kubectl apply -f -
 
-kubectl apply -f "$K8S/60-autoscaling.yaml"
+kubectl apply -f "$K8S/60-autoscaling.yaml" -f "$K8S/70-monitoring.yaml"
 
 echo
 echo "==> waiting for the platform"
@@ -129,3 +167,5 @@ echo
 kubectl get pods -n "$NS"
 echo
 echo "the platform:  http://localhost:30080/api/books"
+echo "Prometheus:    http://localhost:30090"
+echo "Grafana:       http://localhost:30300"

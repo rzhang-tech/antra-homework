@@ -31,6 +31,23 @@
         </dependency>
 
         <!--
+          Micrometer's Prometheus backend (Step 11c). Actuator already collects the metrics - HTTP
+          timings, JVM memory, Hikari pool state, Kafka consumer lag - and Micrometer is the facade
+          over them; this dependency only decides the WIRE FORMAT they are published in, and adds
+          /actuator/prometheus.
+
+          Which is the property worth knowing: swapping Prometheus for CloudWatch, Datadog or OTLP is
+          this one dependency and no application code, because nothing in this project ever references
+          a registry type. A `MeterRegistry` is injected where a custom metric is recorded and that is
+          the whole coupling.
+        -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!--
           Step 6d. Supplies the TextEncryptor behind /encrypt and /decrypt, and the ability to serve a
           `{cipher}...` value decrypted. Without it the config server starts happily, answers
           /encrypt with 404, and serves `{cipher}...` to clients verbatim - a service that then fails

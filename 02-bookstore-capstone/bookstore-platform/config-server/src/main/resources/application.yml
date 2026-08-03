@@ -61,7 +61,7 @@ management:
       exposure:
         # /actuator/health is what Step 10's readiness probe will call, and what tells you the
         # difference between "the config server is down" and "the config server has no such file".
-        include: health,env
+        include: health,env,prometheus
   endpoint:
     health:
       show-details: always
