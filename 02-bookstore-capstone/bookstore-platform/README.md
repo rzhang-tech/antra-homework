@@ -2535,3 +2535,76 @@ service — which is Step 5b's argument, arriving again in a service that had al
 - **The gateway's error rate cannot be attributed to a route.** Spring Cloud Gateway reports `uri` as
   `UNKNOWN` or `NOT_FOUND` because it has no URI templates, so "which route is failing" needs its own
   `gateway_requests_seconds` metrics rather than the HTTP server ones.
+
+---
+
+# Step 11e — the deploy stage, on a runner that deletes a secret instead of storing one
+
+The platform runs on a **t3.large in us-east-1 under k3s**, and `git push` now deploys to it with no
+human in the loop. Measured on the run that wired it up:
+
+```
+test / build and test        4m44s
+8 image jobs                 18s – 53s each, in parallel
+deploy to k3s                4m57s      <- rolling update of 8 deployments, then a smoke test
+```
+
+The images the cluster runs are the ones the pipeline published, verified rather than assumed:
+
+```
+kubectl get deploy -o jsonpath ...
+  ghcr.io/rzhang-tech/bookstore/api-gateway:e55c46f1dd99fffa06a583f806d57aa7255f6f60
+git rev-parse HEAD
+  e55c46f1dd99fffa06a583f806d57aa7255f6f60
+```
+
+## Why a self-hosted runner, and why that is the *secure* option rather than the lazy one
+
+11b left `deploy` gated behind `if: false`, because reaching the cluster from GitHub's runners needs
+one of two things and both are worse than the problem:
+
+- **expose the k3s API server to the internet** so a hosted runner can reach it — opening a Kubernetes
+  control plane to the public to make a demo tidier; or
+- **put a kubeconfig with cluster-admin into `secrets.KUBE_CONFIG`** — a long-lived credential, in a
+  repository, that grants everything.
+
+A runner on the cluster's own machine **inverts the direction**. It polls GitHub over an outbound
+connection, so **no inbound port is opened at all**, and it reads the kubeconfig already sitting on the
+box (`--write-kubeconfig-mode 644` from the k3s install is what makes that work without sudo). Nothing
+is copied, base64-encoded or stored.
+
+That is the third time this project has reached the same conclusion from a different direction —
+**GHCR over ECR** (D38), **IRSA over an access key** (`eks-and-irsa.md`), and now a runner over a
+kubeconfig secret. The improvement worth having is the one that *deletes* the credential, not the one
+that hides it better.
+
+**The approval gate is available and not switched on.** `environment: production` is declared, but a
+GitHub environment with no required reviewer imposes no pause. Adding a reviewer in repository settings
+turns this into the gated deploy the assignment describes; leaving it off is what makes a push deploy
+straight through. Both are one setting, and which one is right depends on who else can push.
+
+## What running on the real target changed
+
+- **Startup is CPU-bound, not memory-bound.** Eight JVMs on 2 vCPU took **3 minutes** to all report
+  Ready from a cold `deploy.sh`, against 34 seconds for compose on a 16-core laptop. Memory was never
+  the constraint: 3.9 GB of 7.8 at rest, comfortably inside the 5504 MiB of limits (10b) — the number
+  that actually mattered was the **CPU requests**, which 10d had to cut from 2050m because the platform
+  would not otherwise have *scheduled* here at all.
+- **The rolling update is sequential in practice.** `rollout status` is called per deployment, so the
+  eight roll one after another and the 4m57s is mostly waiting for JVMs. On a bigger node they would
+  overlap; on this one, that serialisation is what keeps the surge pods from exhausting the machine.
+- **Cross-region works and is invisible.** The instance is in us-east-1 and so is every Step 9 resource
+  — deliberately, after an incident where a region mismatch caused a teardown script to delete the
+  wrong thing. `AWS_REGION` is pinned in the ConfigMap regardless, so the pods would not have noticed
+  either way; the humans and the scripts were the part that needed the two to match.
+
+## What got worse
+
+- **The runner is a standing credential of a different shape.** It is registered to this repository and
+  executes whatever the workflow says, on the machine that holds the cluster. Anyone who can merge to
+  `main` can run arbitrary commands there. That is true of every deploy pipeline and it is worth
+  stating rather than discovering: the protection is branch protection, and this repository has none.
+- **One machine is the cluster, the runner, and the demo.** Nothing here survives losing it, and the
+  HPA is bounded by it (10d).
+- **`deploy.sh` and the pipeline now say the same thing twice** — the script for a human, `cd.yml` for
+  a push — and nothing checks that they agree.
