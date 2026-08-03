@@ -34,6 +34,19 @@ export interface Order {
 
 export interface HistoryEntry { bookId: number; title: string; viewedAt: string; }
 
+/**
+ * The platform's paged envelope.
+ *
+ * **Not every endpoint uses it, and assuming otherwise is a bug that TypeScript cannot catch.** The
+ * catalogue and a user's orders are paged; browsing history is a bare array, because it is already
+ * bounded by a `limit` and a TTL rather than by a page number.
+ *
+ * Typing `GET /api/orders` as `Order[]` compiled cleanly, returned 200, and rendered an empty list —
+ * an interface is a compile-time promise about a runtime shape nobody checked. Found by driving the
+ * UI and reading the response body, which is the only place the truth was.
+ */
+export interface Page<T> { content: T[]; page: number; size: number; totalElements: number; }
+
 @Injectable({ providedIn: 'root' })
 export class Api {
   // The token lives in a signal so the whole UI reacts to logging in and out, and in localStorage so a
@@ -69,7 +82,7 @@ export class Api {
   // The catalogue is public — no token required, which is the platform's own rule rather than a
   // convenience: browsing is PUBLIC, ordering is USER, editing is ADMIN.
   books() {
-    return firstValueFrom(this.http.get<{ content: Book[] }>(`${API}/books?size=20`));
+    return firstValueFrom(this.http.get<Page<Book>>(`${API}/books?size=20`));
   }
 
   // Reading one book is what records a browsing-history entry in DynamoDB — asynchronously, on the
@@ -83,8 +96,11 @@ export class Api {
       this.http.post<Order>(`${API}/orders`, { items: [{ bookId, quantity }] }));
   }
 
-  myOrders() {
-    return firstValueFrom(this.http.get<Order[]>(`${API}/orders`));
+  // Paged, unlike history. Returning `.content` here rather than making every caller unwrap it keeps
+  // the difference between the two endpoints in one place instead of in every component.
+  async myOrders(): Promise<Order[]> {
+    const page = await firstValueFrom(this.http.get<Page<Order>>(`${API}/orders`));
+    return page.content ?? [];
   }
 
   pay(orderId: number) {
