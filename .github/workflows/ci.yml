@@ -1,0 +1,72 @@
+# Build and test the capstone on every push and every pull request.
+#
+# THE POINT OF THIS FILE, stated plainly: since Step 10a every Dockerfile has run `package -DskipTests`
+# (D30), because the suite needs Testcontainers and running it inside an image build would mean
+# docker-in-docker. Until now, "it built" meant only "it compiled". This is where that stops being
+# true — the image job in cd.yml `needs:` this one, so a failing test means no image is produced.
+#
+# The tests are not modified to run here. Testcontainers works on a GitHub-hosted runner because that
+# runner has a Docker daemon, so the same 158 tests that run on a laptop run here, against real
+# PostgreSQL containers and a real embedded Kafka. A test suite that needed a CI-only variant would be
+# a test suite proving something different from the one developers run.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # So the pipeline can be exercised without pushing a commit to prove it works.
+  workflow_dispatch:
+
+# One run per branch. A push that supersedes another cancels it rather than queueing behind it —
+# on a repository with one contributor this is a small saving, and on a busy one it is the difference
+# between a five-minute pipeline and a fifty-minute queue.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build and test
+    runs-on: ubuntu-latest
+    # The suite takes about four minutes locally. Twenty is generous and still bounded: a job with no
+    # timeout is a job that can hang for six hours on a runner somebody is paying for.
+    timeout-minutes: 25
+
+    defaults:
+      run:
+        working-directory: 02-bookstore-capstone/bookstore-platform
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          # Caches ~/.m2 keyed on the pom files. Without it every run re-downloads the whole Spring
+          # dependency tree, which is most of the runtime of a build that otherwise takes four minutes.
+          cache: maven
+
+      # `-B` is batch mode: no ANSI progress spinner, which in a log file is thousands of lines of
+      # download percentages. `-ntp` drops the transfer progress entirely.
+      #
+      # This runs the WHOLE reactor - nine modules, Testcontainers and @EmbeddedKafka included. It is
+      # deliberately not split into a job per module: the modules share nothing (D12), so parallelism
+      # would buy a couple of minutes and cost nine JVM startups and nine dependency caches.
+      - name: Run the tests
+        run: ./mvnw -B -ntp test
+
+      # `if: always()` - the reports are most useful precisely when the step before failed, and the
+      # default is to skip subsequent steps after a failure. A pipeline that discards the evidence on
+      # the runs that need it is a pipeline you debug by adding print statements and pushing again.
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: 02-bookstore-capstone/bookstore-platform/*/target/surefire-reports/
+          retention-days: 7
+          if-no-files-found: warn
