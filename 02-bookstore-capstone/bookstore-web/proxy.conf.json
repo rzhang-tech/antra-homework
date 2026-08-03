@@ -1,0 +1,8 @@
+{
+  "/api": {
+    "target": "http://54.198.32.208:30080",
+    "secure": false,
+    "changeOrigin": false,
+    "logLevel": "debug"
+  }
+}

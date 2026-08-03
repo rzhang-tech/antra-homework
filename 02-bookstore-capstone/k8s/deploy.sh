@@ -24,7 +24,7 @@ CONFIG_REPO=bookstore-platform/config-repo
 NS=bookstore
 
 SERVICES=(config-server api-gateway user-service book-service order-service
-          payment-service notification-service analytics-service)
+          payment-service notification-service analytics-service bookstore-web)
 
 # ---------------------------------------------------------------------------------------------------
 # WHICH IMAGES TO DEPLOY. Two modes, and the manifests hold neither of them as a literal decision:
@@ -161,7 +161,8 @@ sed "s|replaced-by-deploy.sh|$CHECKSUM|" "$K8S/31-config-server.yaml" | sed "$IM
 kubectl rollout status deployment/config-server -n "$NS" --timeout=300s
 
 for f in 40-user-service 41-book-service 42-order-service \
-         43-payment-service 44-notification-service 45-analytics-service 50-api-gateway; do
+         43-payment-service 44-notification-service 45-analytics-service 50-api-gateway \
+         55-bookstore-web; do
   sed "s|replaced-by-deploy.sh|$CHECKSUM|" "$K8S/$f.yaml" | sed "$IMAGE_REWRITE"
   echo "---"
 done | kubectl apply -f -
@@ -206,5 +207,6 @@ echo
 kubectl get pods -n "$NS"
 echo
 echo "the platform:  http://localhost:30080/api/books"
+echo "the frontend:  http://localhost:30081"
 echo "Prometheus:    http://localhost:30090"
 echo "Grafana:       http://localhost:30300"

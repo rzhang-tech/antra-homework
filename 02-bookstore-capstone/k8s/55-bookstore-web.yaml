@@ -1,0 +1,70 @@
+# bookstore-web — the Angular frontend, and the second thing anything outside the cluster can reach.
+#
+# The assignment makes a frontend optional. This one exists so the platform can be demonstrated in a
+# browser rather than in a terminal, and it is deliberately small: one component, no router, no state
+# library. What it does do is exercise every layer behind it — public catalogue, login, a cross-service
+# order, a payment, and both AWS-backed reads.
+#
+# IT TALKS TO THE GATEWAY, NOT TO SERVICES. nginx proxies /api to `api-gateway:8080` (see
+# bookstore-web/nginx.conf), so the browser makes same-origin requests and the frontend has no more
+# access to the platform than any other client — it goes through the same edge, with the same token
+# check, as curl does. A frontend given its own route to user-service would be a second front door.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bookstore-web
+  namespace: bookstore
+  labels: {app: bookstore-web}
+spec:
+  # The second NodePort on the platform, and it stays a NodePort for the same reason the gateway's does:
+  # one server, no cloud load balancer to ask for.
+  type: NodePort
+  selector: {app: bookstore-web}
+  ports:
+    - port: 8080
+      targetPort: http
+      nodePort: 30081
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bookstore-web
+  namespace: bookstore
+  labels: {app: bookstore-web}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: bookstore-web}
+  template:
+    metadata:
+      labels: {app: bookstore-web}
+    spec:
+      containers:
+        - name: bookstore-web
+          image: bookstore/bookstore-web:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+              name: http
+          # No startupProbe. nginx serving static files is ready in milliseconds, not the twenty-odd
+          # seconds a JVM takes — a startupProbe here would suspend the other two for no reason. The
+          # probe budget should match what it is measuring rather than be copied from the neighbours.
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+            failureThreshold: 3
+          # Two orders of magnitude below the Java services, which is the honest cost of nginx plus a
+          # few hundred kilobytes of static files. Worth noticing next to the 512Mi a JVM needs to do
+          # rather less.
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 10m
+            limits:
+              memory: 64Mi

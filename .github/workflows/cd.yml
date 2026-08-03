@@ -1,4 +1,4 @@
-# Build the eight images and publish them, tagged by commit SHA.
+# Build the nine images and publish them, tagged by commit SHA.
 #
 # This job `needs: test`, which is the entire point of splitting it from the build: a failing test now
 # means no image exists to deploy. Step 10a's `-DskipTests` (D30) is still in every Dockerfile and is
@@ -44,8 +44,8 @@ jobs:
       packages: write
 
     strategy:
-      # A matrix, so eight images build in parallel and the log tells you *which* image failed from the
-      # job name alone. One job looping over eight `docker build`s takes eight times as long and
+      # A matrix, so nine images build in parallel and the log tells you *which* image failed from the
+      # job name alone. One job looping over nine `docker build`s takes nine times as long and
       # reports "the build failed".
       matrix:
         service:
@@ -57,7 +57,10 @@ jobs:
           - payment-service
           - notification-service
           - analytics-service
-      # Publish the seven that work rather than abandoning them because one broke.
+          # The Angular frontend. Same two-stage shape, wildly different proportions: Node and
+          # node_modules never ship, and what does is a few hundred kB of static files plus nginx.
+          - bookstore-web
+      # Publish the eight that work rather than abandoning them because one broke.
       fail-fast: false
 
     steps:
@@ -77,8 +80,10 @@ jobs:
         with:
           # The build context is bookstore-platform/ for every service, because each module's pom
           # inherits from the parent pom. Same as `scripts/build-images.sh`.
-          context: 02-bookstore-capstone/bookstore-platform
-          file: 02-bookstore-capstone/bookstore-platform/${{ matrix.service }}/Dockerfile
+          # bookstore-web lives beside bookstore-platform rather than inside it, and builds from
+          # its own directory - it shares no parent pom and needs no sibling module.
+          context: ${{ matrix.service == 'bookstore-web' && '02-bookstore-capstone/bookstore-web' || '02-bookstore-capstone/bookstore-platform' }}
+          file: ${{ matrix.service == 'bookstore-web' && '02-bookstore-capstone/bookstore-web/Dockerfile' || format('02-bookstore-capstone/bookstore-platform/{0}/Dockerfile', matrix.service) }}
           push: true
           # TWO TAGS, AND ONLY ONE OF THEM IS A VERSION.
           #
@@ -97,18 +102,14 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
   # ===================================================================================================
-  # DEPLOY — designed, gated, and deliberately not wired to a cluster in this repository.
+  # DEPLOY — wired, running, and gated only if somebody switches the gate on.
   #
-  # The assignment allows "an automated deploy, or the deploy stage designed with a manual approval gate
-  # before prod". This is the second, and the reason is not effort: reaching the k3s box means either
-  # exposing its API server to GitHub's runners or standing up a self-hosted runner inside it, and
-  # opening a Kubernetes API server to the internet to make a capstone demo tidier is a bad trade that
-  # would sit in this repository as an example.
-  #
-  # `environment: production` is what makes the gate real rather than a comment: with a required
-  # reviewer configured on that environment, the job pauses and GitHub will not run it until a human
-  # approves. The secret is scoped to the environment too, so nothing outside an approved deployment can
-  # read the kubeconfig at all.
+  # The assignment allows "an automated deploy, OR the deploy stage designed with a manual approval gate
+  # before prod". This is the first, and the second is one setting away: `environment: production` is
+  # declared, and a GitHub environment with no required reviewer imposes no pause at all. Adding a
+  # reviewer in repository settings makes the job wait for a human. Which is right depends on who else
+  # can push, and this repository has no branch protection - so the honest statement is that a push to
+  # main currently deploys straight to the cluster.
   # ===================================================================================================
   deploy:
     name: deploy to k3s

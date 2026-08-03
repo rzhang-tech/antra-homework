@@ -1,0 +1,83 @@
+<header>
+  <h1>Bookstore</h1>
+  <div class="who">
+    @if (api.loggedIn()) {
+      <span class="tag">{{ api.username() }}</span>
+      <button class="ghost" (click)="logout()">Sign out</button>
+    } @else {
+      <span class="muted">not signed in</span>
+    }
+  </div>
+</header>
+
+@if (message(); as m) {
+  <div class="toast" [class.err]="m.kind === 'err'">{{ m.text }}</div>
+}
+
+<main>
+  <section class="col">
+    <h2>Catalogue <span class="muted">public — no token required</span></h2>
+    @for (b of books(); track b.id) {
+      <article class="book">
+        <div class="grow">
+          <strong>{{ b.title }}</strong>
+          <div class="muted">{{ b.authorName }} · {{ b.isbn }}</div>
+        </div>
+        <div class="price">{{ b.price | currency:'USD' }}</div>
+        <div class="stock" [class.out]="b.stock === 0">{{ b.stock }} in stock</div>
+        <button class="ghost" (click)="view(b)" [disabled]="!api.loggedIn()">View</button>
+        <button (click)="buy(b)" [disabled]="!api.loggedIn() || b.stock === 0 || busy()">Buy</button>
+      </article>
+    } @empty {
+      <p class="muted">Nothing loaded — is the platform up?</p>
+    }
+  </section>
+
+  <aside class="col side">
+    @if (!api.loggedIn()) {
+      <section class="card">
+        <h2>Sign in</h2>
+        <p class="muted">Ordering needs a JWT. Every service verifies it independently.</p>
+        <input placeholder="username" [(ngModel)]="username" autocomplete="off">
+        <input placeholder="password" type="password" [(ngModel)]="password">
+        <div class="row">
+          <button (click)="login()" [disabled]="busy()">Sign in</button>
+          <button class="ghost" (click)="register()" [disabled]="busy()">Register</button>
+        </div>
+      </section>
+    } @else {
+      <section class="card">
+        <h2>My orders</h2>
+        @for (o of orders(); track o.id) {
+          <div class="order">
+            <div class="grow">
+              <strong>#{{ o.id }}</strong>
+              <span class="badge" [class.paid]="o.status === 'PAID'">{{ o.status }}</span>
+              <div class="muted">
+                @for (i of o.items; track i.bookId) { {{ i.bookTitle }} ×{{ i.quantity }} }
+              </div>
+            </div>
+            <div class="price">{{ o.totalPrice | currency:'USD' }}</div>
+            @if (o.status === 'AWAITING_PAYMENT') {
+              <button (click)="pay(o)" [disabled]="busy()">Pay</button>
+            }
+          </div>
+        } @empty {
+          <p class="muted">No orders yet.</p>
+        }
+      </section>
+
+      <section class="card">
+        <h2>Recently viewed <span class="muted">DynamoDB</span></h2>
+        @for (h of history(); track h.viewedAt) {
+          <div class="hist">
+            <span class="grow">{{ h.title }}</span>
+            <span class="muted">{{ h.viewedAt | date:'HH:mm:ss' }}</span>
+          </div>
+        } @empty {
+          <p class="muted">Open a book to record a view.</p>
+        }
+      </section>
+    }
+  </aside>
+</main>
