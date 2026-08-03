@@ -113,21 +113,29 @@ jobs:
   deploy:
     name: deploy to k3s
     needs: images
-    runs-on: ubuntu-latest
+    # A SELF-HOSTED RUNNER ON THE CLUSTER'S OWN MACHINE, and the choice removes a secret rather than
+    # storing one.
+    #
+    # The alternative was `runs-on: ubuntu-latest` plus a base64 kubeconfig in `secrets.KUBE_CONFIG`.
+    # That needs either the k3s API server exposed to GitHub's runners — opening a Kubernetes control
+    # plane to the internet to make a demo tidier — or a tunnel. And it puts a long-lived credential
+    # with full cluster admin into a repository secret.
+    #
+    # A runner on the box inverts the direction: it *polls* GitHub over an outbound connection, so no
+    # inbound port is opened at all, and it reads the kubeconfig already on the machine. Same argument
+    # as GHCR over ECR (D38) and IRSA over an access key: the improvement worth having is the one that
+    # deletes the credential, not the one that hides it better.
+    runs-on: self-hosted
     environment: production
-    # Runs only when a kubeconfig has actually been configured. Without this the job fails on every
-    # push and the pipeline is permanently red, which trains everyone to ignore it — a red build that
-    # is always red is worse than no build.
-    if: false     # flip to `true` once KUBE_CONFIG is set on the `production` environment
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure kubectl
-        run: |
-          mkdir -p ~/.kube
-          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
-          chmod 600 ~/.kube/config
+      - name: Point kubectl at the local cluster
+        # k3s writes this on install; `--write-kubeconfig-mode 644` is what makes it readable without
+        # sudo. Nothing is copied, decoded or stored — the credential never leaves the machine that
+        # already had it.
+        run: echo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> $GITHUB_ENV
 
       # `set image` per deployment rather than `apply`, because the manifests in k8s/ are the desired
       # state and the image tag is the only thing a deploy changes. Kubernetes then performs a rolling
