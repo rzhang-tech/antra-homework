@@ -1,0 +1,44 @@
+# Everything that varies between deployments, in one object.
+#
+# These are exactly the values 10b turned into `${VAR:laptop-default}` placeholders in the config repo
+# (D31), arriving here from a ConfigMap instead of from a compose `environment:` block. The application
+# cannot tell the difference and does not have a Kubernetes dependency because of it — which is the
+# property that makes `${JWT_SECRET}`-style placeholders better than any framework-specific mechanism.
+#
+# WHY THE KEY NAMES DIFFER FROM THE VARIABLE NAMES. This ConfigMap says `USER_DB_URL`; user-service's
+# container maps it to `DB_URL`. The platform has four database URLs and each service has exactly one,
+# so the two namespaces are genuinely different: `DB_URL` is "the database this process talks to" and
+# `USER_DB_URL` is "the URL of userdb". `envFrom` would flatten them together and hand every service
+# all four — every service would then hold, in its environment, the address of three databases it must
+# never touch. The per-key `configMapKeyRef` in each Deployment is longer and is the point.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bookstore-endpoints
+  namespace: bookstore
+data:
+  # The bootstrap fact: where configuration comes from. Everything else could move into the config
+  # server; this cannot, for the reason Step 6 calls the bootstrap paradox.
+  CONFIG_SERVER_URL: http://config-server:8888
+
+  # In-cluster DNS. `user-db` is short for `user-db.bookstore.svc.cluster.local`, resolvable because
+  # the Service exists — and note the port is 5432 rather than compose's 5433-5436. Those offsets were
+  # only ever a way to keep four PostgreSQL processes off each other's ports on one host. Each pod has
+  # its own network namespace, so every database is on the standard port and the name does the work.
+  USER_DB_URL: jdbc:postgresql://user-db:5432/userdb
+  BOOK_DB_URL: jdbc:postgresql://book-db:5432/bookdb
+  ORDER_DB_URL: jdbc:postgresql://order-db:5432/orderdb
+  PAYMENT_DB_URL: jdbc:postgresql://payment-db:5432/paymentdb
+
+  KAFKA_BOOTSTRAP_SERVERS: kafka-0.kafka.bookstore.svc.cluster.local:29092
+
+  # Service-to-service addresses. order-service calls book-service, payment-service calls
+  # order-service, and the gateway routes to all four. Same shape as the compose values; only the
+  # hostnames changed, and only because the DNS did.
+  USER_SERVICE_URL: http://user-service:8081
+  BOOK_SERVICE_URL: http://book-service:8082
+  ORDER_SERVICE_URL: http://order-service:8083
+  PAYMENT_SERVICE_URL: http://payment-service:8084
+
+  COVERS_BUCKET: bookstore-covers-018733
+  AWS_REGION: us-east-1

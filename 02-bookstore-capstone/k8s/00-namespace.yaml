@@ -1,0 +1,13 @@
+# One namespace for the whole platform.
+#
+# Not cosmetic. A namespace is the unit that ResourceQuota, LimitRange, NetworkPolicy and RBAC are
+# scoped to, so "everything the bookstore is allowed to do" becomes one object to write rather than
+# thirteen. It also makes `kubectl delete namespace bookstore` a complete teardown, which is the
+# Kubernetes equivalent of the rule D28 applies to the AWS scripts: if deleting the namespace leaves
+# something behind, something was created that nobody wrote down.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bookstore
+  labels:
+    app.kubernetes.io/part-of: bookstore

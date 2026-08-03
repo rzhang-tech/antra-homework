@@ -1948,3 +1948,211 @@ is that it removes the long-lived credential rather than hiding it.**
   including four databases with fixed credentials. Compose has no NetworkPolicy; 10c does.
 - **Still no end-to-end automated test.** The purchase flow above was run by hand, exactly as in 5a.
   Now that one command produces the whole platform, the excuse for that is thinner than it was.
+
+---
+
+# Step 10c — Kubernetes, and three probes that answer three different questions
+
+Thirteen containers, as Deployments, StatefulSets, Services, a ConfigMap, a Secret and probes. The
+manifests are in [k8s/](../k8s), developed against a one-node kind cluster and written to run unchanged
+on the k3s box they are going to.
+
+```
+kind create cluster --config k8s/kind-cluster.yaml
+./scripts/build-images.sh
+./k8s/deploy.sh --load
+```
+
+**13/13 Ready, and register → browse → order → pay → both consumers all work through
+`localhost:30080`.** The catalog starts empty and order ids start at 1, because the PersistentVolumes
+are new — which is itself the check that Flyway ran from V1 inside the cluster.
+
+## The prediction this step got wrong
+
+The service manifests were written expecting `CrashLoopBackOff` to be the ordering mechanism. Kubernetes
+has no `depends_on`; a controller reconciles towards a state rather than running a startup sequence, so
+seven services should start before the config server is ready, fail fast, exit, and be restarted with
+backoff until it answers.
+
+Measured on the first deploy of all thirteen at once:
+
+```
+RESTARTS   0     (every pod, including all seven config-server clients)
+```
+
+What absorbed it was `spring.cloud.config.retry` — six attempts over about 31 seconds, added in **Step
+6a** so that a laptop would not need its services launched in a particular order. The config server
+answers inside that window, so the retry happens *inside one JVM* and the kubelet never sees a failure.
+**A retry block written for a laptop is what stops the whole platform crash-looping on Kubernetes.**
+
+CrashLoopBackOff remains the fallback if the config server takes longer than the budget. Both paths
+converge; the only difference is whether the waiting happens inside the process or between restarts.
+The comment in the manifest now says what happened rather than what was expected — 9d's rule, that a
+measurement which does not measure what it was set up to measure is an open action rather than a
+footnote, applies just as well to a measurement that comes back different from the guess.
+
+## The liveness probe must not be `/actuator/health`
+
+This is the most consequential line in the manifests, so it was demonstrated rather than argued.
+`user-db` scaled to zero, then user-service inspected from inside its own pod:
+
+```
+/actuator/health             timed out          <- the datasource indicator BLOCKS
+/actuator/health/liveness    {"status":"UP"}
+/actuator/health/readiness   {"status":"UP"}
+pod                          Ready, 0 restarts
+POST /api/auth/login         504
+```
+
+Plain `/actuator/health` does not merely report DOWN — it **hangs**, waiting on a connection that will
+never come. A liveness probe against it fails on `timeoutSeconds`, three times, and the kubelet deletes
+a container with nothing wrong with it. Every replica, of every service sharing that database, in a
+loop, for a problem no restart can fix — each restart discarding a connection pool that was seconds
+from reconnecting.
+
+With `user-db` scaled back:
+
+```
+same pod, still Ready, still 0 restarts, register -> 201
+```
+
+It recovered on its own. That outcome is what the probe split protects, and it is the argument for
+`/actuator/health/liveness` in one measurement.
+
+### Readiness deliberately does not check the database either
+
+Spring's default readiness group contains only `readinessState`, and it would have been easy to "fix"
+that by adding `db`. It is left alone on purpose: a readiness probe over a **shared** dependency removes
+*every* replica from the Service's endpoints at the same moment, so callers get connection refused
+instead of a 503 they can interpret, and one backend's problem becomes a total outage of everything in
+front of it.
+
+**Readiness answers "can this process serve", not "is the whole system well".** The two look alike right
+up to the incident.
+
+### And what a startupProbe is actually for
+
+Kafka's readiness check was `kafka-broker-api-versions.sh`, which forks a JVM. With the default
+`timeoutSeconds: 1`:
+
+```
+Readiness probe failed: command timed out after 1s   (x34 over 6m31s)
+```
+
+Raising the timeout fixes it and leaves a JVM starting every ten seconds forever on a two-core node. The
+fix is structural: the expensive, truthful check becomes the **startupProbe**, which runs only until it
+first succeeds and suspends the other two while it does; a cheap TCP check takes over afterwards. The
+broker is proven to answer a real request once, and never pays for that proof again. Ready in **14
+seconds**.
+
+The same structure gives the Java services two independent budgets — 3 minutes to boot, 60 seconds to
+notice a hang afterwards — instead of one liveness probe that has to be patient enough for the worst
+cold start and therefore too patient to catch anything.
+
+## The number that would not have fitted on the server
+
+```
+kubectl describe node
+
+  cpu   2050m (12%)      <- 13 pods at 100m, plus the control plane's own ~950m
+```
+
+12% of a 16-core laptop, and **over 100% of a t3.large**, which has 2000m in total. The scheduler places
+on *requests*, so the platform would not have fitted on its own deployment target: pods stuck `Pending`
+with a message about insufficient cpu and nothing wrong with any container. Found only because the
+number was read rather than assumed.
+
+Requests came down to 50m per service and 25m per database — **600m for the whole platform**, the rest
+being kind's kubeadm-style control plane, which k3s replaces with a single process.
+
+**There are no CPU limits at all**, and that is a decision (D33). Memory is incompressible, so a
+container over its limit must be killed; CPU is compressible, and a CPU limit does not kill, it
+*throttles* — the cgroup gets its quota per 100 ms and then stops until the next period. That is worst
+exactly at JVM startup, where class loading and JIT want every core for twenty seconds, so a modest
+limit turns a 20-second start into minutes and can make a startupProbe give up on a healthy service.
+
+| | requests | limits |
+|---|---|---|
+| cpu | 600m (platform) | none, deliberately |
+| memory | 3658Mi incl. control plane | 5894Mi |
+
+## Configuration, and the bug 10b hit twice
+
+The config repo arrives as a ConfigMap volume — the same shape as 10b's bind mount, for the same
+reason: an image containing configuration makes every configuration change a rebuild.
+
+But a ConfigMap updated in place changes nothing on its own, because the process read those files at
+startup and does not re-read them. That was 10b's bug, twice in one afternoon, and Kubernetes does not
+fix it — `kubectl apply` on a ConfigMap leaves every pod exactly as it was.
+
+So `deploy.sh` stamps a checksum of the config repo onto the pod template:
+
+```
+before                      config-server-56d8f67fb6-svfxd   b99fbcdea3ece689
+expiration-minutes 60 -> 45
+after                       config-server-5779d6cb65-8cvq2   270ca1441ec6ec2d
+GET /user-service/dev  ->   "app.jwt.expiration-minutes": 45
+```
+
+A new pod, because a changed annotation is a changed template and a changed template is what a
+Deployment rolls out. This is the standard idiom, and it is worth knowing that it is an idiom rather
+than a feature: nothing in Kubernetes connects a ConfigMap to the workloads that mount it.
+
+Addresses live in a second ConfigMap, and the key names deliberately differ from the variable names —
+`USER_DB_URL` in the ConfigMap becomes `DB_URL` in user-service's container. `envFrom` would have been
+shorter and would hand every service all four database URLs; the per-key `configMapKeyRef` means no
+service holds the address of a database it must never touch.
+
+**A Kubernetes Secret is base64 in etcd, not encryption.** `kubectl get secret -o yaml | base64 -d` is
+the whole attack. What it does buy: the value stays out of Git, it is a separate RBAC resource so "can
+deploy" and "can read credentials" can be different permissions, and rotating it does not rebuild an
+image. What actually fixes it is not storing a long-lived credential at all — which for the AWS half is
+10d's IRSA.
+
+## StatefulSet for the databases, and it is not about replication
+
+Each of these is one replica, so the reason is not scale. A Deployment treats its pods as
+interchangeable and can start the new one before stopping the old during a rollout — two PostgreSQL
+processes on one PersistentVolume, which is corruption rather than contention. A StatefulSet gives a
+stable identity, a volume bound to that identity, and at-most-one semantics per ordinal.
+
+The same argument is why Kafka is a StatefulSet, plus one more: a client must reach a *specific* broker,
+the one leading its partition, so a load-balancing Service in front of brokers is wrong in a way that
+looks fine with one broker and breaks with two.
+
+What this is not: a production database. One replica, no backups, no failover, no PodDisruptionBudget,
+on the same cluster as its clients. D26 already argues for RDS; the honest reason these are in-cluster
+is that a capstone should start with one command for whoever clones it.
+
+## Exposure, checked rather than assumed
+
+```
+localhost:30080   200
+localhost:8081    refused          localhost:8888   refused
+localhost:8082    refused          localhost:9090   refused
+
+kubectl get svc api-gateway -o jsonpath -> http -> 8080        (9090 appears nowhere)
+```
+
+The gateway's management port is not in its Service, so actuator is unreachable from outside the pod by
+construction — and `kubectl port-forward` still works for whoever legitimately needs it. Every other
+service is `ClusterIP`, which is Step 8's promise enforced by the absence of anything else rather than
+by a rule anyone could get wrong.
+
+There is no Ingress, deliberately. api-gateway already **is** the edge; an ingress controller in front
+of it would be a second front door with its own routing, its own CORS and its own place to get
+authentication wrong — which is exactly what Step 8 spent a step removing.
+
+## What got worse
+
+- **Two descriptions of the same platform.** `docker-compose.yml` and `k8s/` both say what runs, with
+  the same memory numbers and the same addresses written twice, and nothing checks that they agree. A
+  Helm chart or Kustomize overlays would collapse them; both add a templating language to a project
+  whose manifests are currently readable as-is, and the duplication is the price of that.
+- **`:latest` on eight images plus `imagePullPolicy: Never`.** Together they mean "whatever was last
+  loaded into this node", which is not a version and cannot be rolled back to. Step 11.
+- **The Secret is base64 and the AWS credentials are long-lived.** Stated above; 10d fixes the second
+  half and nothing here fixes the first.
+- **One node, one replica of everything.** Nothing here has been shown to survive a node failure,
+  because there is nowhere for anything to move to. `replicas: 2` is one word, and it is 10d's problem
+  because 5d's recovery job and 7d's DLT monitor both assume they are the only instance.

@@ -751,6 +751,58 @@ because the default is a laptop address, which is unreachable from anywhere it w
 
 ---
 
+## D32 — Liveness and readiness probes check the process, never its dependencies
+
+**Decision.** `livenessProbe` and `readinessProbe` both point at Spring's dedicated probe groups
+(`/actuator/health/liveness`, `/actuator/health/readiness`), which contain only the application's own
+state. Neither includes the datasource, Kafka, or any downstream service.
+
+**Why liveness must not.** Measured with `user-db` scaled to zero: plain `/actuator/health` does not
+return DOWN, it **hangs** on a connection that never comes. A liveness probe against it fails on
+timeout, three times, and the kubelet deletes the container — on every replica of every service sharing
+that database, repeatedly, for a problem no restart can fix, each restart throwing away a connection
+pool that was about to reconnect. **A liveness probe should only ask what a restart could repair.**
+
+**Why readiness must not either**, which is the less obvious half. Readiness failure removes a pod from
+its Service's endpoints, so a readiness probe over a *shared* dependency empties every endpoint at the
+same instant: callers get connection refused rather than an interpretable 503, and one backend's blip
+becomes a total outage of everything in front of it. Readiness answers "can this process serve", not
+"is the whole system well".
+
+**What it costs.** A pod whose database is gone stays Ready and keeps receiving requests it will answer
+with errors. That is the intended trade: the errors are visible, attributable and survivable, and the
+alternative failure mode is not.
+
+**The pattern in one line.** Health for a *human* aggregates everything; health for an *automated
+actuator* must only include what that actuator can fix.
+
+---
+
+## D33 — Memory limits everywhere, CPU limits nowhere
+
+**Decision.** Every container has a memory request and a memory limit. None has a CPU limit.
+
+**Why the asymmetry.** Memory is incompressible: a process that wants more than it has cannot be slowed
+down into fitting, so the only enforcement is killing it, and a limit is what stops one leak taking the
+node with it. CPU is compressible: a limit does not kill, it *throttles* — the cgroup receives its quota
+each 100 ms period and then stops until the next one.
+
+**Why throttling is worse than it sounds here.** It bites hardest at JVM startup, where class loading
+and JIT compilation want every core available for twenty seconds. A modest CPU limit turns a 20-second
+start into minutes and can make a `startupProbe` give up on a service with nothing wrong with it — and
+the restart replays the same slow start.
+
+**What still constrains CPU.** Requests. They are what the scheduler places on, and what sets relative
+CPU shares when the node is contended, which is the part that actually matters. Requests were cut from
+100m to 50m per service after `kubectl describe node` showed 2050m requested — over 100% of the
+2000m t3.large this deploys to, which would have left pods `Pending` on the real target.
+
+**When a CPU limit would be right.** Multi-tenant clusters where one namespace must not be able to
+starve another, and any workload billed by CPU. Neither applies to a single-tenant platform on a
+dedicated box.
+
+---
+
 ## D5 — Cross-service references are plain IDs, not foreign keys
 
 **Decision.** `order_item.book_id` and `orders.user_id` are plain `BIGINT` columns with no FK constraint.

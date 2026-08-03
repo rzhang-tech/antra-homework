@@ -1,0 +1,101 @@
+# api-gateway — the platform's only address, and the only Service anything outside the cluster can
+# reach. See 40-user-service.yaml for the probe and resource reasoning.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: bookstore
+  labels: {app: api-gateway}
+spec:
+  # NodePort: every node listens on port 30080 and forwards to this Service.
+  #
+  # Three ways to expose something, and picking between them is a real interview question:
+  #
+  #   ClusterIP   in-cluster only. What the other seven services use, because nothing outside should
+  #               reach them — which is Step 8's promise, enforced here by the *absence* of anything
+  #               else rather than by a rule.
+  #   NodePort    a port on every node. Works on kind and k3s identically, needs no cloud integration,
+  #               and is what this platform uses because its target is one server.
+  #   LoadBalancer  asks the cloud provider for a real load balancer — an ELB on EKS, and on k3s the
+  #               bundled ServiceLB, which simply binds the node's own IP. On kind it stays
+  #               <pending> forever, because there is no provider to ask.
+  #
+  # A production cluster would put an Ingress in front instead, and this platform deliberately does
+  # not: api-gateway already *is* the edge. Step 8 spent a whole step arguing for one front door, and
+  # an Ingress controller in front of it would be a second one, with its own routing rules, its own
+  # CORS configuration and its own place to get authentication wrong.
+  type: NodePort
+  selector: {app: api-gateway}
+  ports:
+    - port: 8080
+      targetPort: http
+      nodePort: 30080
+      name: http
+  # 9090 IS DELIBERATELY ABSENT. The management port serves actuator, and Step 8c moved it there after
+  # `curl localhost:8080/actuator/env` returned the platform's configuration on the internet-facing
+  # component. Naming only 8080 here means the management port is unreachable from outside the pod BY
+  # CONSTRUCTION — there is no rule to misconfigure, and `kubectl port-forward` remains available for
+  # whoever legitimately needs it.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: bookstore
+  labels: {app: api-gateway}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: api-gateway}
+  template:
+    metadata:
+      labels: {app: api-gateway}
+    spec:
+      containers:
+        - name: api-gateway
+          image: bookstore/api-gateway:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 9090
+              name: management
+          env:
+            - name: CONFIG_SERVER_URL
+              valueFrom:
+                configMapKeyRef: {name: bookstore-endpoints, key: CONFIG_SERVER_URL}
+            - name: USER_SERVICE_URL
+              valueFrom:
+                configMapKeyRef: {name: bookstore-endpoints, key: USER_SERVICE_URL}
+            - name: BOOK_SERVICE_URL
+              valueFrom:
+                configMapKeyRef: {name: bookstore-endpoints, key: BOOK_SERVICE_URL}
+            - name: ORDER_SERVICE_URL
+              valueFrom:
+                configMapKeyRef: {name: bookstore-endpoints, key: ORDER_SERVICE_URL}
+            - name: PAYMENT_SERVICE_URL
+              valueFrom:
+                configMapKeyRef: {name: bookstore-endpoints, key: PAYMENT_SERVICE_URL}
+          # All three probes hit `management`, not `http`. Asking 8080 for /actuator/health gets a 404
+          # — there is no route for it, which is the entire property above — so a probe written against
+          # the public port would report this pod unhealthy forever and Kubernetes would restart the
+          # gateway in a loop while it was serving traffic perfectly.
+          startupProbe:
+            httpGet: {path: /actuator/health/liveness, port: management}
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            httpGet: {path: /actuator/health/readiness, port: management}
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /actuator/health/liveness, port: management}
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: 280Mi
+              cpu: 50m
+            limits:
+              memory: 448Mi

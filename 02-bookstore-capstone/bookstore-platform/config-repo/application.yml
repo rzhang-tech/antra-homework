@@ -162,6 +162,24 @@ management:
   endpoint:
     health:
       show-details: always
+      # Splits /actuator/health into two more useful questions, and 10c's probes depend on the
+      # distinction absolutely:
+      #
+      #   /actuator/health/liveness    is this process broken beyond recovery?   -> restart it
+      #   /actuator/health/readiness   can it serve traffic right now?           -> route to it
+      #
+      # Pointing a Kubernetes livenessProbe at plain /actuator/health is the classic mistake, and it
+      # is worth being able to say why: that endpoint aggregates the datasource, so a database outage
+      # makes every replica "unhealthy" and Kubernetes restarts all of them - repeatedly, for a problem
+      # no restart can fix, while the pods that would have recovered lose their connection pools. The
+      # liveness group deliberately contains only the application's own state.
+      #
+      # Spring Boot turns these on by itself when it detects Kubernetes (the KUBERNETES_SERVICE_HOST
+      # environment variable). It is set explicitly anyway: auto-detection makes the endpoints exist in
+      # one environment and 404 in another, and a readinessProbe against a 404 is a pod that never
+      # becomes Ready, with nothing in the log to say so.
+      probes:
+        enabled: true
 
 resilience4j:
   # Aspect ordering is platform policy, so it is stated once. The per-instance thresholds are not -

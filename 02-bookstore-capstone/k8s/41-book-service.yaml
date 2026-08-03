@@ -1,0 +1,94 @@
+# book-service — the catalog, and the only service that talks to S3 and DynamoDB.
+#
+# The probe block, the resource block and the config wiring are the same shape in all seven service
+# manifests; 40-user-service.yaml carries the reasoning for each and is the one to read first.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: book-service
+  namespace: bookstore
+  labels: {app: book-service}
+spec:
+  selector: {app: book-service}
+  ports:
+    - port: 8082
+      targetPort: http
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: book-service
+  namespace: bookstore
+  labels: {app: book-service}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: book-service}
+  template:
+    metadata:
+      labels: {app: book-service}
+    spec:
+      containers:
+        - name: book-service
+          image: bookstore/book-service:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8082
+              name: http
+          env:
+            - name: CONFIG_SERVER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: bookstore-endpoints
+                  key: CONFIG_SERVER_URL
+            - name: DB_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: bookstore-endpoints
+                  key: BOOK_DB_URL
+            - name: COVERS_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: bookstore-endpoints
+                  key: COVERS_BUCKET
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: bookstore-endpoints
+                  key: AWS_REGION
+            # The IAM user's credentials, from a Secret. This is the platform's weakest secret
+            # handling and 10d replaces it: IRSA gives the pod a role through its ServiceAccount and
+            # there is no long-lived key to leak. Optional, so book-service still starts without AWS
+            # configured - it serves the catalog and fails only on the cover and history endpoints.
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: bookstore-secrets
+                  key: AWS_ACCESS_KEY_ID
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: bookstore-secrets
+                  key: AWS_SECRET_ACCESS_KEY
+                  optional: true
+          startupProbe:
+            httpGet: {path: /actuator/health/liveness, port: http}
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            httpGet: {path: /actuator/health/readiness, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /actuator/health/liveness, port: http}
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: 400Mi
+              cpu: 50m
+            limits:
+              memory: 640Mi

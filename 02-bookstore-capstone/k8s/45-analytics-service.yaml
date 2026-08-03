@@ -1,0 +1,68 @@
+# analytics-service — the second event consumer.
+#
+# The probe block, the resource block and the config wiring are the same shape in all seven service
+# manifests; 40-user-service.yaml carries the reasoning for each and is the one to read first.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics-service
+  namespace: bookstore
+  labels: {app: analytics-service}
+spec:
+  selector: {app: analytics-service}
+  ports:
+    - port: 8086
+      targetPort: http
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-service
+  namespace: bookstore
+  labels: {app: analytics-service}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: analytics-service}
+  template:
+    metadata:
+      labels: {app: analytics-service}
+    spec:
+      containers:
+        - name: analytics-service
+          image: bookstore/analytics-service:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8086
+              name: http
+          env:
+            - name: CONFIG_SERVER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: bookstore-endpoints
+                  key: CONFIG_SERVER_URL
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: bookstore-endpoints
+                  key: KAFKA_BOOTSTRAP_SERVERS
+          startupProbe:
+            httpGet: {path: /actuator/health/liveness, port: http}
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            httpGet: {path: /actuator/health/readiness, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /actuator/health/liveness, port: http}
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: 224Mi
+              cpu: 50m
+            limits:
+              memory: 384Mi

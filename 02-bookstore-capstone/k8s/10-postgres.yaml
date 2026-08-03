@@ -1,0 +1,374 @@
+# The four databases. Database-per-Service, unchanged from Step 5a: four servers, four credentials,
+# four volumes. book-service still cannot read the users table, and now it also cannot resolve the DNS
+# name unless it asks for it by name.
+#
+# StatefulSet rather than Deployment, and the reason is not replication - each of these is one replica.
+# A Deployment treats its pods as interchangeable: on an update it can start the new pod before
+# stopping the old one, and both would mount the same PersistentVolume. Two PostgreSQL processes on one
+# data directory is corruption, not contention. A StatefulSet gives a stable identity (`user-db-0`), a
+# stable volume bound to that identity, and at-most-one semantics per ordinal.
+#
+# `volumeClaimTemplates` creates one PersistentVolumeClaim per pod, satisfied by whatever default
+# StorageClass the cluster has - kind's local-path provisioner here, EBS via the CSI driver on EKS. The
+# manifest names no storage technology, which is what makes it portable.
+#
+# WHAT THIS IS NOT. A production database on the same cluster as its clients, with a single replica, no
+# backups, no failover and no PodDisruptionBudget. Real deployments use RDS (D26 has the argument), and
+# the honest reason these are in-cluster is that a capstone should be startable with one command by
+# whoever clones it. Stated rather than implied.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-db
+  namespace: bookstore
+  labels: {app: user-db}
+spec:
+  # `clusterIP: None` - a headless Service. It gives the StatefulSet's pods DNS records
+  # (user-db-0.user-db) instead of load-balancing across them, which is what "address one specific
+  # database" requires. Load-balancing across database replicas would send a write to a reader.
+  clusterIP: None
+  selector: {app: user-db}
+  ports:
+    - port: 5432
+      targetPort: postgres
+      name: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: user-db
+  namespace: bookstore
+spec:
+  serviceName: user-db
+  replicas: 1
+  selector:
+    matchLabels: {app: user-db}
+  template:
+    metadata:
+      labels: {app: user-db}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              value: userdb
+            - name: POSTGRES_USER
+              value: userdb
+            # A password in plain text in a manifest, and it is the same userdb/userdb the compose file
+            # uses. Deliberately not a Secret: a Secret is base64, not encryption, so moving this
+            # string into one would look more secure and be exactly as readable. What makes a
+            # credential safe is that it is generated per environment and never committed - which is
+            # true of nothing in this file, and is what an external secret store fixes. See the note
+            # in 30-config-server.yaml.
+            - name: POSTGRES_PASSWORD
+              value: userdb
+            # PostgreSQL refuses to initialise into a non-empty directory, and a mounted PVC is not
+            # empty - it has lost+found. This subdirectory is the standard answer.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          # `pg_isready` is the same check compose used, and here it feeds two different mechanisms:
+          # readiness decides whether this pod appears in the Service's endpoints (so a client never
+          # dials a database that is still recovering), liveness decides whether to restart it.
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "userdb", "-d", "userdb"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "userdb", "-d", "userdb"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            # requests decide SCHEDULING - the node must have this much free, and it is reserved.
+            # limits decide KILLING - exceed this and the kernel OOMKills the container.
+            # Measured at 37 MiB idle in 10b; the request is real usage, the limit is compose's number.
+            requests:
+              memory: 96Mi
+              cpu: 25m
+            limits:
+              memory: 192Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: book-db
+  namespace: bookstore
+  labels: {app: book-db}
+spec:
+  # `clusterIP: None` - a headless Service. It gives the StatefulSet's pods DNS records
+  # (book-db-0.book-db) instead of load-balancing across them, which is what "address one specific
+  # database" requires. Load-balancing across database replicas would send a write to a reader.
+  clusterIP: None
+  selector: {app: book-db}
+  ports:
+    - port: 5432
+      targetPort: postgres
+      name: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: book-db
+  namespace: bookstore
+spec:
+  serviceName: book-db
+  replicas: 1
+  selector:
+    matchLabels: {app: book-db}
+  template:
+    metadata:
+      labels: {app: book-db}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              value: bookdb
+            - name: POSTGRES_USER
+              value: bookdb
+            # A password in plain text in a manifest, and it is the same bookdb/bookdb the compose file
+            # uses. Deliberately not a Secret: a Secret is base64, not encryption, so moving this
+            # string into one would look more secure and be exactly as readable. What makes a
+            # credential safe is that it is generated per environment and never committed - which is
+            # true of nothing in this file, and is what an external secret store fixes. See the note
+            # in 30-config-server.yaml.
+            - name: POSTGRES_PASSWORD
+              value: bookdb
+            # PostgreSQL refuses to initialise into a non-empty directory, and a mounted PVC is not
+            # empty - it has lost+found. This subdirectory is the standard answer.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          # `pg_isready` is the same check compose used, and here it feeds two different mechanisms:
+          # readiness decides whether this pod appears in the Service's endpoints (so a client never
+          # dials a database that is still recovering), liveness decides whether to restart it.
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "bookdb", "-d", "bookdb"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "bookdb", "-d", "bookdb"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            # requests decide SCHEDULING - the node must have this much free, and it is reserved.
+            # limits decide KILLING - exceed this and the kernel OOMKills the container.
+            # Measured at 37 MiB idle in 10b; the request is real usage, the limit is compose's number.
+            requests:
+              memory: 96Mi
+              cpu: 25m
+            limits:
+              memory: 192Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-db
+  namespace: bookstore
+  labels: {app: order-db}
+spec:
+  # `clusterIP: None` - a headless Service. It gives the StatefulSet's pods DNS records
+  # (order-db-0.order-db) instead of load-balancing across them, which is what "address one specific
+  # database" requires. Load-balancing across database replicas would send a write to a reader.
+  clusterIP: None
+  selector: {app: order-db}
+  ports:
+    - port: 5432
+      targetPort: postgres
+      name: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: order-db
+  namespace: bookstore
+spec:
+  serviceName: order-db
+  replicas: 1
+  selector:
+    matchLabels: {app: order-db}
+  template:
+    metadata:
+      labels: {app: order-db}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              value: orderdb
+            - name: POSTGRES_USER
+              value: orderdb
+            # A password in plain text in a manifest, and it is the same orderdb/orderdb the compose file
+            # uses. Deliberately not a Secret: a Secret is base64, not encryption, so moving this
+            # string into one would look more secure and be exactly as readable. What makes a
+            # credential safe is that it is generated per environment and never committed - which is
+            # true of nothing in this file, and is what an external secret store fixes. See the note
+            # in 30-config-server.yaml.
+            - name: POSTGRES_PASSWORD
+              value: orderdb
+            # PostgreSQL refuses to initialise into a non-empty directory, and a mounted PVC is not
+            # empty - it has lost+found. This subdirectory is the standard answer.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          # `pg_isready` is the same check compose used, and here it feeds two different mechanisms:
+          # readiness decides whether this pod appears in the Service's endpoints (so a client never
+          # dials a database that is still recovering), liveness decides whether to restart it.
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "orderdb", "-d", "orderdb"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "orderdb", "-d", "orderdb"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            # requests decide SCHEDULING - the node must have this much free, and it is reserved.
+            # limits decide KILLING - exceed this and the kernel OOMKills the container.
+            # Measured at 37 MiB idle in 10b; the request is real usage, the limit is compose's number.
+            requests:
+              memory: 96Mi
+              cpu: 25m
+            limits:
+              memory: 192Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-db
+  namespace: bookstore
+  labels: {app: payment-db}
+spec:
+  # `clusterIP: None` - a headless Service. It gives the StatefulSet's pods DNS records
+  # (payment-db-0.payment-db) instead of load-balancing across them, which is what "address one specific
+  # database" requires. Load-balancing across database replicas would send a write to a reader.
+  clusterIP: None
+  selector: {app: payment-db}
+  ports:
+    - port: 5432
+      targetPort: postgres
+      name: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: payment-db
+  namespace: bookstore
+spec:
+  serviceName: payment-db
+  replicas: 1
+  selector:
+    matchLabels: {app: payment-db}
+  template:
+    metadata:
+      labels: {app: payment-db}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              value: paymentdb
+            - name: POSTGRES_USER
+              value: paymentdb
+            # A password in plain text in a manifest, and it is the same paymentdb/paymentdb the compose file
+            # uses. Deliberately not a Secret: a Secret is base64, not encryption, so moving this
+            # string into one would look more secure and be exactly as readable. What makes a
+            # credential safe is that it is generated per environment and never committed - which is
+            # true of nothing in this file, and is what an external secret store fixes. See the note
+            # in 30-config-server.yaml.
+            - name: POSTGRES_PASSWORD
+              value: paymentdb
+            # PostgreSQL refuses to initialise into a non-empty directory, and a mounted PVC is not
+            # empty - it has lost+found. This subdirectory is the standard answer.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          # `pg_isready` is the same check compose used, and here it feeds two different mechanisms:
+          # readiness decides whether this pod appears in the Service's endpoints (so a client never
+          # dials a database that is still recovering), liveness decides whether to restart it.
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "paymentdb", "-d", "paymentdb"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "paymentdb", "-d", "paymentdb"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            # requests decide SCHEDULING - the node must have this much free, and it is reserved.
+            # limits decide KILLING - exceed this and the kernel OOMKills the container.
+            # Measured at 37 MiB idle in 10b; the request is real usage, the limit is compose's number.
+            requests:
+              memory: 96Mi
+              cpu: 25m
+            limits:
+              memory: 192Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

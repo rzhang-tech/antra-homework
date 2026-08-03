@@ -1,0 +1,143 @@
+# Kafka, single broker, KRaft mode. Step 7's broker, in a pod.
+#
+# A StatefulSet for the same reason the databases are: a broker's log directory belongs to *that*
+# broker. A Deployment could start a second pod on the same volume during a rollout, and two brokers
+# claiming node id 1 with one copy of the log is not a state Kafka recovers from.
+#
+# It is also the reason a broker cannot be behind an ordinary load-balancing Service: a client must
+# reach a *specific* broker, the one leading the partition it wants. That is what the headless Service
+# and the per-pod DNS name below are for, and it is why "just put Kafka behind a Service" does not
+# work even though it appears to during a demo with one broker.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: bookstore
+  labels: {app: kafka}
+spec:
+  clusterIP: None
+  selector: {app: kafka}
+  ports:
+    - port: 29092
+      targetPort: internal
+      name: internal
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: bookstore
+spec:
+  serviceName: kafka
+  replicas: 1
+  selector:
+    matchLabels: {app: kafka}
+  template:
+    metadata:
+      labels: {app: kafka}
+    spec:
+      containers:
+        - name: kafka
+          image: apache/kafka:3.9.1
+          ports:
+            - containerPort: 29092
+              name: internal
+          env:
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: broker,controller
+            # ONE listener here, where compose needed two. The reason is the same one in both places:
+            # advertise the address that is correct from where the caller sits. In compose there were
+            # two kinds of caller — containers and the laptop. In the cluster there is one, so
+            # `kafka-0.kafka` (the pod's stable DNS name, which is what a StatefulSet exists to give
+            # it) is the only address anything needs.
+            #
+            # Reaching this broker from outside the cluster would need a third listener and a
+            # per-broker NodePort, because a load balancer in front of brokers breaks the "talk to the
+            # partition leader" requirement above. Nothing here needs that, and it is the single most
+            # common way a Kafka-on-Kubernetes setup goes wrong.
+            - name: KAFKA_LISTENERS
+              value: INTERNAL://:29092,CONTROLLER://:9093
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: INTERNAL://kafka-0.kafka.bookstore.svc.cluster.local:29092
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: INTERNAL
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: CONTROLLER
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: 1@kafka-0.kafka.bookstore.svc.cluster.local:9093
+            # All three default to 3, which one broker cannot satisfy: it starts, then fails the
+            # moment anything needs an internal topic, which reads exactly like a client bug.
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: "0"
+            # Topics are created by the applications (KafkaTopicsConfig). Auto-creation turns a typo in
+            # a topic name into a new, empty, permanently silent topic.
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "false"
+            - name: KAFKA_HEAP_OPTS
+              value: "-Xmx512m -Xms512m"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka/data
+          # THREE PROBES, and the split between them is the interesting part.
+          #
+          # The truthful check — "does this broker answer an API request?" — costs a JVM fork, because
+          # kafka-broker-api-versions.sh is a Java program. The first version of this file used it as
+          # the readiness probe with the default `timeoutSeconds: 1` and the pod never became ready:
+          #
+          #   Readiness probe failed: command timed out ... after 1s   (x34 over 6m31s)
+          #
+          # Raising the timeout fixes it and leaves a JVM being started every ten seconds, forever, on
+          # a node with two cores.
+          #
+          # So the expensive check runs where it earns its cost. A startupProbe runs *only until it
+          # first succeeds*, and while it is running the other two are suspended entirely — so the
+          # broker is proven to answer once, and from then on the cheap check takes over. That is what
+          # startupProbe is actually for, rather than "a longer initialDelaySeconds".
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 >/dev/null 2>&1
+            timeoutSeconds: 10
+            periodSeconds: 10
+            failureThreshold: 18      # up to 3 minutes to come up, then give up and restart
+          # A TCP connect, deliberately weaker than the check above. It cannot distinguish "listening"
+          # from "serving", and the honest reason it is used is cost — which is the same trade Strimzi
+          # and the Bitnami chart make for the same reason. The startupProbe is what makes it
+          # defensible: nothing reaches this state without having answered a real request first.
+          readinessProbe:
+            tcpSocket:
+              port: internal
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: internal
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 100m
+            limits:
+              memory: 768Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi

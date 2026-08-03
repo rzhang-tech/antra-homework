@@ -1,0 +1,169 @@
+# user-service — issues the tokens every other service verifies.
+#
+# THE CANONICAL SERVICE MANIFEST. The other six repeat this shape with a different name, port and set
+# of environment variables; the reasoning lives here.
+#
+# ---------------------------------------------------------------------------------------------------
+# THERE IS NO `depends_on`, AND THAT IS NOT AN OMISSION.
+#
+# Compose could say "start after the config server is healthy". Kubernetes has no such field, on
+# purpose: a controller reconciles towards a desired state rather than executing a startup sequence,
+# and a dependency graph would make the whole platform undeployable whenever one node in it was slow.
+#
+# The expectation was that this pod would start before the config server is ready, fail to fetch its
+# configuration, exit, and be restarted by the kubelet with exponential backoff — `CrashLoopBackOff` as
+# the ordering mechanism. **That is not what happened.** Measured on the first deploy of all thirteen
+# pods at once: every one reached Ready with a restart count of **0**.
+#
+# What absorbed it was `spring.cloud.config.retry` from Step 6a — six attempts over about 31 seconds,
+# added back then so a laptop's cold start would not need the services launched in order. The config
+# server answers inside that window, so the retry happens *within one JVM* and the kubelet never sees a
+# failure. A block written for a laptop turns out to be what stops the whole platform crash-looping on
+# Kubernetes.
+#
+# CrashLoopBackOff is still the fallback, and is what happens if the config server takes longer than
+# the retry budget. Both paths converge; the difference is only whether the waiting happens inside the
+# process or between restarts. `fail-fast: true` is what makes either acceptable — a service that fell
+# back to bundled defaults would come up healthy holding last release's signing key.
+#
+# An initContainer that waits for the config server is the usual instinct. It mostly reimplements the
+# backoff with less visibility; what it would buy is a clearer `kubectl describe`, because
+# CrashLoopBackOff during a cold start looks identical to CrashLoopBackOff from a real defect. That
+# ambiguity is the real cost, and it is why the events and the log matter more here than pod status.
+# ---------------------------------------------------------------------------------------------------
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-service
+  namespace: bookstore
+  labels: {app: user-service}
+spec:
+  selector: {app: user-service}
+  ports:
+    - port: 8081
+      targetPort: http
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+  namespace: bookstore
+  labels: {app: user-service}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: user-service}
+  template:
+    metadata:
+      labels: {app: user-service}
+    spec:
+      containers:
+        - name: user-service
+          image: bookstore/user-service:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8081
+              name: http
+          env:
+            - name: CONFIG_SERVER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: bookstore-endpoints
+                  key: CONFIG_SERVER_URL
+            - name: DB_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: bookstore-endpoints
+                  key: USER_DB_URL
+          # THREE PROBES ANSWERING THREE DIFFERENT QUESTIONS. Getting these wrong is the most common
+          # way a working application behaves badly on Kubernetes, so each one is spelled out.
+          #
+          # startupProbe — "has it finished booting yet?" It runs first and SUSPENDS the other two
+          # while it runs, which is the whole reason it exists. A Spring Boot service here takes about
+          # 20 seconds; a liveness probe with a 3-failure threshold would kill it at second 30 during a
+          # slow start and restart it into the same slow start, forever. The alternative — a liveness
+          # probe patient enough for the worst cold start — is a probe that then takes minutes to
+          # notice a real hang. This separates the two budgets: 36 x 5s = 3 minutes to boot, and 60
+          # seconds to notice a hang afterwards.
+          startupProbe:
+            httpGet: {path: /actuator/health/liveness, port: http}
+            periodSeconds: 5
+            failureThreshold: 36
+          # readinessProbe — "should traffic go to it right now?" Failing removes the pod from its
+          # Service's endpoints and does NOT restart it. This is the probe that makes a rolling update
+          # not drop requests, and the one that lets a service refuse traffic while a downstream
+          # dependency is down without being killed for it.
+          readinessProbe:
+            httpGet: {path: /actuator/health/readiness, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+          # livenessProbe — "is it broken beyond recovery?" Failing DELETES the container.
+          #
+          # It points at /actuator/health/**liveness**, not /actuator/health, and that is the single
+          # most important line in this file. Demonstrated by scaling user-db to zero and watching:
+          #
+          #   /actuator/health             timed out       <- the datasource indicator BLOCKS
+          #   /actuator/health/liveness    {"status":"UP"}
+          #   /actuator/health/readiness   {"status":"UP"}
+          #   pod                          Ready, 0 restarts
+          #   POST /api/auth/login         504
+          #
+          # Plain /actuator/health does not merely report DOWN, it *hangs* waiting for a connection
+          # that never comes — so a liveness probe against it fails on `timeoutSeconds` and the kubelet
+          # kills a process with nothing wrong with it. Every replica of every affected service, in a
+          # loop, for a problem no restart can fix, each restart throwing away a connection pool that
+          # was about to reconnect.
+          #
+          # With the database back the same pod recovered on its own: still Ready, still 0 restarts,
+          # `register 201`. That is the outcome the probe split is protecting.
+          #
+          # READINESS DELIBERATELY DOES NOT CHECK THE DATABASE EITHER, and this is a choice rather than
+          # Spring's default going unexamined. Adding `db` to the readiness group would remove every
+          # replica from the Service's endpoints the moment the shared database blinked — the Service
+          # would have zero endpoints, and callers would get connection refused instead of a 503 they
+          # can interpret. A readiness probe over a *shared* dependency converts one backend's problem
+          # into a total outage of everything in front of it. Readiness answers "is this process able
+          # to serve", not "is the whole system well".
+          livenessProbe:
+            httpGet: {path: /actuator/health/liveness, port: http}
+            periodSeconds: 20
+            failureThreshold: 3
+          # REQUESTS DECIDE SCHEDULING, LIMITS DECIDE KILLING. The distinction compose could not
+          # express.
+          #
+          # `requests` is what the scheduler subtracts from a node's capacity, and it is reserved
+          # whether or not it is used — set it too high and pods stop fitting; too low and the node
+          # accepts more work than it can hold and the kernel starts OOMKilling. `limits` is the cgroup
+          # ceiling the JVM reads for -XX:MaxRAMPercentage (10a) and the number that gets the container
+          # killed.
+          #
+          # The memory request is 10b's measured idle footprint; the limit is 10b's limit. Requests
+          # below limits is deliberate overcommit: these eight JVMs are not all busy at once, and
+          # reserving every peak would need a machine sized for a peak that never happens at once.
+          #
+          # THE CPU REQUEST WAS 100m AND HAD TO COME DOWN. `kubectl describe node` on the first deploy:
+          #
+          #   cpu   2050m (12%)      <- 13 pods at 100m, plus the control plane's own ~750m
+          #
+          # 12% of this laptop and **over 100% of a t3.large**, which has 2000m in total. The scheduler
+          # places on requests, so the platform would not have fit on its own deployment target — every
+          # pod that did not fit stuck in `Pending`, with a message about insufficient cpu and nothing
+          # wrong with any of the containers. Found on a 16-core laptop only because the number was
+          # read rather than assumed.
+          #
+          # THERE IS NO CPU LIMIT, and that is deliberate rather than an omission. Memory is
+          # incompressible — a process over its limit must be killed — but CPU is compressible, and a
+          # CPU limit does not kill, it *throttles*: the cgroup gets its quota per 100 ms period and
+          # then stops until the next one. On a JVM that is worst exactly at startup, where class
+          # loading and JIT want every core for twenty seconds, so a modest limit turns a 20-second
+          # start into minutes and can make a startupProbe give up. Requests already give the scheduler
+          # what it needs and set relative shares under contention; a limit mostly adds latency nobody
+          # asked for.
+          resources:
+            requests:
+              memory: 320Mi
+              cpu: 50m
+            limits:
+              memory: 512Mi

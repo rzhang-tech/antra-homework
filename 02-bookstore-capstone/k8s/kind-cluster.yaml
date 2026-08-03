@@ -1,0 +1,28 @@
+# The local cluster the manifests in this directory are developed against.
+#
+#   kind create cluster --config k8s/kind-cluster.yaml
+#   kind delete cluster --name bookstore
+#
+# kind is "Kubernetes IN Docker": the node is a container running a kubelet and containerd, and the
+# pods run inside it. That makes it a development tool rather than a deployment target — but the
+# manifests it takes are the same manifests k3s and EKS take, which is the whole point of writing them.
+#
+# ONE NODE, on purpose. The deployment target is a single 8 GiB t3.large running k3s, and a three-node
+# kind cluster would let a manifest pass locally that cannot be scheduled there. Matching the shape of
+# the real target matters more than demonstrating that the scheduler can spread pods, and 10d's HPA
+# does not need a second node to be worth watching.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: bookstore
+
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      # The gateway's NodePort, forwarded to the same port on the host.
+      #
+      # 30080 rather than 8080 for two reasons: NodePort's default range really is 30000-32767, so the
+      # number says what kind of Service this is, and it leaves 8080 free for the docker-compose stack.
+      # On the 8 GiB server the two must not run at once; on a laptop it is merely convenient.
+      - containerPort: 30080
+        hostPort: 30080
+        protocol: TCP

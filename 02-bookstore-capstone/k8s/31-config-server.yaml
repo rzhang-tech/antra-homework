@@ -1,0 +1,97 @@
+# config-server. The one every other service refuses to start without.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: config-server
+  namespace: bookstore
+  labels: {app: config-server}
+spec:
+  selector: {app: config-server}
+  ports:
+    - port: 8888
+      targetPort: http
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: config-server
+  namespace: bookstore
+  labels: {app: config-server}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: config-server}
+  template:
+    metadata:
+      labels: {app: config-server}
+      annotations:
+        # Changing a file in config-repo/ changes this checksum, which changes the pod template, which
+        # makes Kubernetes do a rolling restart. Without it, `kubectl apply` updates the ConfigMap and
+        # nothing happens — the running pod keeps the configuration it read at startup, which is
+        # precisely the bug 10b hit twice in one afternoon. deploy.sh recomputes it.
+        bookstore.config-repo/checksum: "replaced-by-deploy.sh"
+    spec:
+      containers:
+        - name: config-server
+          image: bookstore/config-server:latest
+          # Never pull: the image is loaded into the node by `kind load` / `k3s ctr images import`,
+          # and there is no registry behind `bookstore/...`. With the default policy, a `:latest` tag
+          # makes the kubelet try to pull and fail with ImagePullBackOff on an image that is already
+          # there. Step 11 pushes to a registry and this becomes IfNotPresent against a SHA tag.
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8888
+              name: http
+          env:
+            # The master key, from a Secret rather than from this file.
+            #
+            # WHAT A KUBERNETES SECRET IS, stated because it is the most over-trusted object in
+            # Kubernetes: base64 in etcd. Not encryption. `kubectl get secret -o yaml` plus `base64 -d`
+            # is the whole attack, and anyone who can read Secrets in this namespace can read it.
+            #
+            # What it does buy, which is not nothing: it keeps the value out of the manifest and
+            # therefore out of Git, it is a separate RBAC resource so "can deploy" and "can read
+            # credentials" can be different permissions, and it is mounted rather than baked, so
+            # rotating it does not rebuild an image.
+            #
+            # What actually fixes it is not storing a long-lived secret at all — encryption at rest on
+            # etcd, an external store through the Secrets Store CSI driver, or, for the AWS half,
+            # IRSA (10d), which removes the credential rather than hiding it.
+            - name: ENCRYPT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: bookstore-secrets
+                  key: ENCRYPT_KEY
+            - name: CONFIG_REPO
+              value: file:/config-repo
+          volumeMounts:
+            # The config repo arrives as a mounted directory. Identical in shape to 10b's bind mount,
+            # and for the identical reason: an image that contains configuration makes every
+            # configuration change a rebuild, which is the property Step 6 existed to remove. The
+            # image's own copy is still there, underneath, and is what makes `docker run` work.
+            - name: config-repo
+              mountPath: /config-repo
+              readOnly: true
+          startupProbe:
+            httpGet: {path: /actuator/health, port: http}
+            periodSeconds: 5
+            failureThreshold: 24        # 2 minutes of JVM start before this is called a failure
+          readinessProbe:
+            httpGet: {path: /actuator/health, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /actuator/health, port: http}
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 50m
+            limits:
+              memory: 384Mi
+      volumes:
+        - name: config-repo
+          configMap:
+            name: bookstore-config-repo
