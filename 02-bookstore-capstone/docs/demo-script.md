@@ -15,6 +15,13 @@ On the laptop, open the monitoring ports to your current address:
 ./scripts/aws/allow-my-ip.sh i-0cf3ea62b8d46ee6d --monitor
 ```
 
+That opens 22, 30080 (API), 30090 (Prometheus) and 30300 (Grafana) to your current address. **Add
+30081 for the frontend** the first time:
+
+```bash
+aws ec2 authorize-security-group-ingress --group-id <sg> --protocol tcp --port 30081   --cidr $(curl -s https://checkip.amazonaws.com)/32 --region us-east-1
+```
+
 Then connect, and set the two variables everything below uses:
 
 ```bash
@@ -31,6 +38,25 @@ Sanity check before you press record — if this is not `200`, fix it off-camera
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' $API/api/books
 ```
+
+---
+
+## 0 · Open with the frontend  (~1.5 min)
+
+Browser: **http://\<public-ip\>:30081**
+
+Do the whole customer journey by clicking — register, view a book, buy it, pay. It takes forty seconds
+and it is the only part of the demo a non-engineer can follow.
+
+> A small Angular app, served by nginx in the same cluster. It calls `/api/...` relative and nginx
+> proxies to the gateway, so the browser makes same-origin requests and the frontend has **no more
+> access to the platform than curl does** — same edge, same token check. A frontend with its own route
+> to user-service would be a second front door, which is what Step 8 spent a step removing.
+
+Then say what is about to happen, and spend the rest of the video proving it:
+
+> Everything you just saw crossed four services, two databases, a Kafka topic and DynamoDB. None of
+> that is visible from here, which is the point of the next ten minutes.
 
 ---
 
